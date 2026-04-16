@@ -1,5 +1,87 @@
 # citywalk-pulse-backend
 
+CityWalk Pulse 的后端服务骨架，面向“动态约束 + 非确定性环境”的城市探索 Agent。
+
+## 技术栈
+- Node.js + TypeScript
+- Express
+- Zod（请求参数校验）
+
+## 已实现骨架
+- `GET /api/health`：健康检查
+- `POST /api/plan`：城市漫步规划接口（当前为可运行 mock 逻辑）
+- Agent 分层：
+  - `src/agents/urbanPulseAgent.ts`：核心规划与自我修正逻辑入口
+  - `src/tools/mapTool.ts`：地图 POI 工具适配层（待接真实 API）
+  - `src/tools/weatherTool.ts`：天气工具适配层（待接真实 API）
+
+## 目录结构
+```text
+src/
+  app.ts
+  server.ts
+  config/
+    env.ts
+  routes/
+    index.ts
+    health.ts
+    plan.ts
+  controllers/
+    planController.ts
+  services/
+    plannerService.ts
+  agents/
+    urbanPulseAgent.ts
+  tools/
+    mapTool.ts
+    weatherTool.ts
+  types/
+    plan.ts
+```
+
+## 本地启动
+1. 安装依赖
+   ```bash
+   npm install
+   ```
+2. 配置环境变量
+   ```bash
+   cp .env.example .env
+   ```
+3. 启动开发服务
+   ```bash
+   npm run dev
+   ```
+
+默认端口：`3000`
+
+## API 示例
+### 健康检查
+```bash
+curl http://localhost:3000/api/health
+```
+
+### 生成路线
+```bash
+curl -X POST http://localhost:3000/api/plan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "city": "南京",
+    "startPoint": "新街口",
+    "durationMinutes": 180,
+    "budget": 100,
+    "preferences": ["书店", "咖啡"],
+    "weatherRisk": "medium"
+  }'
+```
+
+## 下一步开发建议
+- 接入高德 POI 与路径规划 API
+- 接入和风天气小时级接口
+- 在 `urbanPulseAgent` 中加入更细粒度重规划规则（闭店、排队、突发降雨）
+- 增加评估指标输出（预算超支率、时间可行率、调用成功率）
+# citywalk-pulse-backend
+
 
 
 ## Getting started
