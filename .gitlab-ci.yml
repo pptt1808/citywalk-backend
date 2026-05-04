@@ -71,6 +71,7 @@ deploy:
     SSH_KEY: "C:/gitlab-runner/.ssh/id_rsa"
     DEPLOY_HOST: "root@106.14.66.114"
   script:
+    - ssh -i "$env:SSH_KEY" -o StrictHostKeyChecking=no "$env:DEPLOY_HOST" "mkdir -p /var/www/citywalk /opt/citywalk"
     - scp -i "$env:SSH_KEY" -o StrictHostKeyChecking=no -r frontend/dist/* "$($env:DEPLOY_HOST):/var/www/citywalk/"
     - scp -i "$env:SSH_KEY" -o StrictHostKeyChecking=no -r dist "$($env:DEPLOY_HOST):/opt/citywalk/"
     - scp -i "$env:SSH_KEY" -o StrictHostKeyChecking=no package.json "$($env:DEPLOY_HOST):/opt/citywalk/"
