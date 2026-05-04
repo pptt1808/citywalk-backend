@@ -2,15 +2,15 @@ stages:
   - build
   - deploy
 
-# ══════════════════════════════════════════════
+# 
 #  Agent 后端（TypeScript / Node.js）
-# ══════════════════════════════════════════════
+# 
 build-backend:
   stage: build
   tags:
     - shell
   only:
-    - main
+    - master
     - merge_requests
   script:
     - npm config set registry https://registry.npmmirror.com
@@ -25,15 +25,15 @@ build-backend:
       - dist/
     expire_in: 1 hour
 
-# ══════════════════════════════════════════════
+# 
 #  Agent 前端（Vue3）
-# ══════════════════════════════════════════════
+# 
 build-frontend:
   stage: build
   tags:
     - shell
   only:
-    - main
+    - master
     - merge_requests
   script:
     - cd frontend
@@ -50,15 +50,15 @@ build-frontend:
       - frontend/dist/
     expire_in: 1 hour
 
-# ══════════════════════════════════════════════
-#  部署（仅 main 分支触发，服务器信息待填）
-# ══════════════════════════════════════════════
+# 
+#  部署（仅 master 分支触发）
+# 
 deploy:
   stage: deploy
   tags:
     - shell
   only:
-    - main
+    - master
   needs:
     - build-backend
     - build-frontend
