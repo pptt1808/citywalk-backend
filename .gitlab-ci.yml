@@ -1,0 +1,80 @@
+stages:
+  - build
+  - deploy
+
+# ══════════════════════════════════════════════
+#  Agent 后端（TypeScript / Node.js）
+# ══════════════════════════════════════════════
+build-backend:
+  stage: build
+  tags:
+    - shell
+  only:
+    - main
+    - merge_requests
+  script:
+    - npm config set registry https://registry.npmmirror.com
+    - npm install
+    - npm run build
+  cache:
+    key: agent-backend-node
+    paths:
+      - node_modules/
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 hour
+
+# ══════════════════════════════════════════════
+#  Agent 前端（Vue3）
+# ══════════════════════════════════════════════
+build-frontend:
+  stage: build
+  tags:
+    - shell
+  only:
+    - main
+    - merge_requests
+  script:
+    - cd frontend
+    - npm config set registry https://registry.npmmirror.com
+    - npm install
+    - npx vue-tsc --noEmit
+    - npx vite build
+  cache:
+    key: agent-frontend-node
+    paths:
+      - frontend/node_modules/
+  artifacts:
+    paths:
+      - frontend/dist/
+    expire_in: 1 hour
+
+# ══════════════════════════════════════════════
+#  部署（仅 main 分支触发，服务器信息待填）
+# ══════════════════════════════════════════════
+deploy:
+  stage: deploy
+  tags:
+    - shell
+  only:
+    - main
+  needs:
+    - build-backend
+    - build-frontend
+  variables:
+    SSH_KEY: "C:\\gitlab-runner\\.ssh\\id_rsa"
+    DEPLOY_HOST: "root@106.14.66.114"
+  script:
+    # 将前端 dist 推送到服务器
+    - scp -i "$env:SSH_KEY" -o StrictHostKeyChecking=no -r frontend/dist/* "${env:DEPLOY_HOST}:/var/www/citywalk/"
+    # 将后端 dist 和 package.json 推送到服务器
+    - scp -i "$env:SSH_KEY" -o StrictHostKeyChecking=no -r dist "${env:DEPLOY_HOST}:/opt/citywalk/"
+    - scp -i "$env:SSH_KEY" -o StrictHostKeyChecking=no package.json "${env:DEPLOY_HOST}:/opt/citywalk/"
+    # 在服务器上安装依赖并重启服务
+    - ssh -i "$env:SSH_KEY" -o StrictHostKeyChecking=no $env:DEPLOY_HOST "cd /opt/citywalk && npm install --production --registry https://registry.npmmirror.com && pkill -f 'node.*dist/server' || true && nohup node dist/server.js > /opt/citywalk/app.log 2>&1 &"
+    - echo "Agent 应用部署完成"
+  environment:
+    name: production
+    url: http://106.14.66.114
+  when: on_success
