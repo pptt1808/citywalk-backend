@@ -6,6 +6,7 @@ before_script:
   - $OutputEncoding = [System.Text.Encoding]::UTF8
   - "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"
   - "[Console]::InputEncoding = [System.Text.Encoding]::UTF8"
+  - Set-Location $env:CI_PROJECT_DIR
 
 # 
 #  Agent 后端（TypeScript / Node.js）
