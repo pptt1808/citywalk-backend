@@ -1,0 +1,80 @@
+stages:
+  - build
+  - deploy
+
+# ══════════════════════════════════════════════
+#  Agent 后端（TypeScript / Node.js）
+# ══════════════════════════════════════════════
+build-backend:
+  stage: build
+  tags:
+    - shell
+  only:
+    - main
+    - merge_requests
+  script:
+    - npm config set registry https://registry.npmmirror.com
+    - npm install
+    - npm run build
+  cache:
+    key: agent-backend-node
+    paths:
+      - node_modules/
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 hour
+
+# ══════════════════════════════════════════════
+#  Agent 前端（Vue3）
+# ══════════════════════════════════════════════
+build-frontend:
+  stage: build
+  tags:
+    - shell
+  only:
+    - main
+    - merge_requests
+  script:
+    - cd frontend
+    - npm config set registry https://registry.npmmirror.com
+    - npm install
+    - npx vue-tsc --noEmit
+    - npx vite build
+  cache:
+    key: agent-frontend-node
+    paths:
+      - frontend/node_modules/
+  artifacts:
+    paths:
+      - frontend/dist/
+    expire_in: 1 hour
+
+# ══════════════════════════════════════════════
+#  部署（仅 main 分支触发，服务器信息待填）
+# ══════════════════════════════════════════════
+deploy:
+  stage: deploy
+  tags:
+    - shell
+  only:
+    - main
+  needs:
+    - build-backend
+    - build-frontend
+  script:
+    # 部署前端
+    - rm -rf /var/www/citywalk/*
+    - cp -r frontend/dist/* /var/www/citywalk/
+    # 部署后端
+    - rm -rf /opt/citywalk/*
+    - cp -r dist /opt/citywalk/
+    - cp package.json /opt/citywalk/
+    - cd /opt/citywalk && npm install --production --registry https://registry.npmmirror.com
+    - pkill -f "node.*dist/server" || true
+    - nohup node dist/server.js > /opt/citywalk/app.log 2>&1 &
+    - echo "Agent 应用部署完成"
+  environment:
+    name: production
+    url: http://106.14.66.114:3000
+  when: on_success
