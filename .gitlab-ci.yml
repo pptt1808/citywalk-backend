@@ -63,18 +63,15 @@ deploy:
     - build-backend
     - build-frontend
   script:
-    # 部署前端
-    - rm -rf /var/www/citywalk/*
-    - cp -r frontend/dist/* /var/www/citywalk/
-    # 部署后端
-    - rm -rf /opt/citywalk/*
-    - cp -r dist /opt/citywalk/
-    - cp package.json /opt/citywalk/
-    - cd /opt/citywalk && npm install --production --registry https://registry.npmmirror.com
-    - pkill -f "node.*dist/server" || true
-    - nohup node dist/server.js > /opt/citywalk/app.log 2>&1 &
+    # 将前端 dist 推送到服务器
+    - scp -o StrictHostKeyChecking=no -r frontend/dist/* root@106.14.66.114:/var/www/citywalk/
+    # 将后端 dist 和 package.json 推送到服务器
+    - scp -o StrictHostKeyChecking=no -r dist root@106.14.66.114:/opt/citywalk/
+    - scp -o StrictHostKeyChecking=no package.json root@106.14.66.114:/opt/citywalk/
+    # 在服务器上安装依赖并重启服务
+    - ssh -o StrictHostKeyChecking=no root@106.14.66.114 "cd /opt/citywalk && npm install --production --registry https://registry.npmmirror.com && pkill -f 'node.*dist/server' || true && nohup node dist/server.js > /opt/citywalk/app.log 2>&1 &"
     - echo "Agent 应用部署完成"
   environment:
     name: production
-    url: http://106.14.66.114:3000
+    url: http://106.14.66.114
   when: on_success
