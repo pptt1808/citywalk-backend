@@ -2,19 +2,11 @@ stages:
   - build
   - deploy
 
-before_script:
-  - $OutputEncoding = [System.Text.Encoding]::UTF8
-  - "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"
-  - "[Console]::InputEncoding = [System.Text.Encoding]::UTF8"
-  - Set-Location "C:\gitlab-runner\builds\d-GaPcbZs\0\2026seiii-029-Aigent\citywalk-pulse-backend"
-
 # 
 #  Agent 后端（TypeScript / Node.js）
 # 
 build-backend:
   stage: build
-  tags:
-    - shell
   only:
     - master
     - merge_requests
@@ -36,8 +28,6 @@ build-backend:
 # 
 build-frontend:
   stage: build
-  tags:
-    - shell
   only:
     - master
     - merge_requests
@@ -57,24 +47,24 @@ build-frontend:
     expire_in: 1 hour
 
 # 
-#  部署（仅 master 分支触发）
+#  部署（仅 master 分支触发，Runner 运行在部署服务器上，直接本地操作）
 # 
 deploy:
   stage: deploy
-  tags:
-    - shell
   only:
     - master
   needs:
     - build-backend
     - build-frontend
   script:
-    - ssh -i "C:/gitlab-runner/.ssh/id_rsa" -o StrictHostKeyChecking=no root@106.14.66.114 "mkdir -p /var/www/citywalk /opt/citywalk"
-    - scp -i "C:/gitlab-runner/.ssh/id_rsa" -o StrictHostKeyChecking=no -r frontend/dist/* root@106.14.66.114:/var/www/citywalk/
-    - scp -i "C:/gitlab-runner/.ssh/id_rsa" -o StrictHostKeyChecking=no -r dist root@106.14.66.114:/opt/citywalk/
-    - scp -i "C:/gitlab-runner/.ssh/id_rsa" -o StrictHostKeyChecking=no package.json root@106.14.66.114:/opt/citywalk/
-    - ssh -i "C:/gitlab-runner/.ssh/id_rsa" -o StrictHostKeyChecking=no root@106.14.66.114 "cd /opt/citywalk && npm install --production --registry https://registry.npmmirror.com && pkill -f 'node.*dist/server' || true && nohup node dist/server.js > /opt/citywalk/app.log 2>&1 &"
-    - Write-Host "Agent 应用部署完成"
+    - mkdir -p /var/www/citywalk /opt/citywalk
+    - cp -r frontend/dist/* /var/www/citywalk/
+    - cp -r dist /opt/citywalk/
+    - cp package.json /opt/citywalk/
+    - cd /opt/citywalk && npm install --production --registry https://registry.npmmirror.com
+    - pkill -f 'node.*dist/server' || true
+    - nohup node dist/server.js > /opt/citywalk/app.log 2>&1 &
+    - echo "Agent 应用部署完成"
   environment:
     name: production
     url: http://106.14.66.114
