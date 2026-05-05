@@ -35,8 +35,9 @@ build-frontend:
     - cd frontend
     - npm config set registry https://registry.npmmirror.com
     - npm install
-    - npx vue-tsc --noEmit
-    - npx vite build
+    - chmod +x ./node_modules/.bin/vue-tsc ./node_modules/.bin/vite
+    - ./node_modules/.bin/vue-tsc --noEmit
+    - ./node_modules/.bin/vite build
   cache:
     key: agent-frontend-node
     paths:
