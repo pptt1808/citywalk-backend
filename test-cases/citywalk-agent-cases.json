@@ -1,0 +1,119 @@
+[
+  {
+    "id": "cw_normal_bookstore_cafe",
+    "name": "常规书店咖啡路线",
+    "input": {
+      "task": "南京从新街口出发，3小时，预算100元，想逛书店和咖啡，尽量步行，路线不要太累"
+    },
+    "expect": {
+      "expectedTools": ["get_weather", "search_poi_nearby", "plan_route"],
+      "expectedMaxSteps": 18
+    }
+  },
+  {
+    "id": "cw_rain_indoor_first",
+    "name": "雨天优先室内备选",
+    "input": {
+      "task": "南京今天可能下雨，从新街口出发，4小时，预算150元，想去博物馆、书店、咖啡馆，尽量安排室内路线"
+    },
+    "expect": {
+      "expectedTools": ["get_weather", "search_poi_nearby", "plan_route"],
+      "expectedMaxSteps": 22
+    }
+  },
+  {
+    "id": "cw_low_budget",
+    "name": "低预算触发压缩",
+    "input": {
+      "task": "南京从新街口出发，2.5小时，预算30元，想逛书店和景点，最好不要超预算"
+    },
+    "expect": {
+      "expectedTools": ["get_weather", "search_poi_nearby", "plan_route"],
+      "expectedMaxSteps": 22
+    }
+  },
+  {
+    "id": "cw_short_duration",
+    "name": "短时间路线压缩",
+    "input": {
+      "task": "南京新街口附近，只有90分钟，预算80元，想喝咖啡再随便逛一个有意思的点，步行即可"
+    },
+    "expect": {
+      "expectedTools": ["get_weather", "search_poi_nearby", "plan_route"],
+      "expectedMaxSteps": 18
+    }
+  },
+  {
+    "id": "cw_transit_multi_area",
+    "name": "地铁公交跨区域",
+    "input": {
+      "task": "南京从新街口出发，5小时，预算200元，想去博物馆、玄武湖、公园和美食店，可以坐地铁或公交，尽量少走回头路"
+    },
+    "expect": {
+      "expectedTools": ["get_weather", "search_poi_nearby", "plan_route"],
+      "expectedMaxSteps": 22
+    }
+  },
+  {
+    "id": "cw_family_children",
+    "name": "亲子轻松路线",
+    "input": {
+      "task": "南京一家三口带小孩，从新街口出发，4小时，预算180元，想要轻松一点，有休息点，最好包含商场、咖啡或展览"
+    },
+    "expect": {
+      "expectedTools": ["get_weather", "search_poi_nearby", "plan_route"],
+      "expectedMaxSteps": 22
+    }
+  },
+  {
+    "id": "cw_air_weather_sensitive",
+    "name": "天气和空气敏感",
+    "input": {
+      "task": "南京如果空气质量不好或者有天气预警，就尽量室内。新街口出发，3小时，预算120元，喜欢美术馆、书店、商场"
+    },
+    "expect": {
+      "expectedTools": ["get_weather", "search_poi_nearby", "plan_route"],
+      "expectedMaxSteps": 22
+    }
+  },
+  {
+    "id": "cw_food_and_walk",
+    "name": "美食加散步",
+    "input": {
+      "task": "南京从新街口开始，晚上2小时，预算120元，想吃南京本地美食，再安排一个适合散步拍照的地方"
+    },
+    "expect": {
+      "expectedTools": ["get_weather", "search_poi_nearby", "plan_route"],
+      "expectedMaxSteps": 18
+    }
+  },
+  {
+    "id": "cw_structured_input",
+    "name": "结构化输入兼容",
+    "input": {
+      "city": "南京",
+      "startPoint": "新街口",
+      "durationMinutes": 180,
+      "budget": 100,
+      "preferences": ["书店", "咖啡", "博物馆"],
+      "peopleCount": 2,
+      "transportMode": "mixed",
+      "weatherPreference": "indoor_first"
+    },
+    "expect": {
+      "expectedTools": ["get_weather", "search_poi_nearby", "plan_route"],
+      "expectedMaxSteps": 18
+    }
+  },
+  {
+    "id": "cw_impossible_constraints",
+    "name": "极端约束兜底",
+    "input": {
+      "task": "南京从新街口出发，只有30分钟，预算1元，但想去三个地方，还要喝咖啡和吃饭"
+    },
+    "expect": {
+      "expectedTools": ["get_weather", "search_poi_nearby", "plan_route"],
+      "expectedMaxSteps": 20
+    }
+  }
+]

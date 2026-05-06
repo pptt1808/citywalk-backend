@@ -8,6 +8,7 @@ import {
   TraceStep,
   UserConstraints
 } from "../types/plan";
+import { LlmRouter } from "../llm/llmRouter";
 import { MapTool, Poi, RouteLeg } from "../tools/mapTool";
 import { WeatherContext, WeatherTool } from "../tools/weatherTool";
 
@@ -43,6 +44,10 @@ const CityWalkState = Annotation.Root({
   corrections: Annotation<string[]>({
     reducer: (left, right) => left.concat(right),
     default: () => []
+  }),
+  llmModels: Annotation<string[]>({
+    reducer: (left, right) => left.concat(right),
+    default: () => []
   })
 });
 
@@ -50,6 +55,8 @@ type CityWalkGraphState = typeof CityWalkState.State;
 type CityWalkGraphUpdate = typeof CityWalkState.Update;
 
 export class CityWalkGraphRunner {
+  private readonly llmRouter = new LlmRouter();
+
   constructor(
     private readonly mapTool: MapTool,
     private readonly weatherTool: WeatherTool
@@ -79,7 +86,8 @@ export class CityWalkGraphRunner {
       events: [],
       traceSteps: [],
       decisionLog: [],
-      corrections: []
+      corrections: [],
+      llmModels: []
     };
 
     const state = await graph.invoke(initialState, { recursionLimit: 30 });
@@ -101,7 +109,7 @@ export class CityWalkGraphRunner {
         task,
         steps: traceSteps,
         metadata: {
-          model: "heuristic-planner-langgraph-js",
+          model: state.llmModels.at(-1) ?? "heuristic-planner-langgraph-js",
           agent_version: "citywalk-pulse-agent-v0.2",
           response_time_ms: responseTimeMs,
           agent_id: "citywalk-pulse"
@@ -133,14 +141,32 @@ export class CityWalkGraphRunner {
   }
 
   private async parseNode(state: CityWalkGraphState): Promise<CityWalkGraphUpdate> {
-    const constraints = this.parseConstraints(state.rawInput);
-    const event = this.event("THINK", "解析自然语言与表单约束，形成可执行的城市漫步约束。", state, "parse");
+    const fallbackConstraints = this.parseConstraints(state.rawInput);
+    const llmParsed = await this.tryParseConstraintsWithLlm(state.task, state.rawInput);
+    const constraints = {
+      ...fallbackConstraints,
+      ...llmParsed?.data,
+      city: state.rawInput.city ?? llmParsed?.data.city ?? fallbackConstraints.city,
+      startPoint: state.rawInput.startPoint ?? llmParsed?.data.startPoint ?? fallbackConstraints.startPoint,
+      durationMinutes: state.rawInput.durationMinutes ?? llmParsed?.data.durationMinutes ?? fallbackConstraints.durationMinutes,
+      budget: state.rawInput.budget ?? llmParsed?.data.budget ?? fallbackConstraints.budget,
+      preferences: state.rawInput.preferences?.length
+        ? state.rawInput.preferences
+        : this.normalizePreferences((llmParsed?.data as Record<string, unknown> | undefined)?.preferences, fallbackConstraints.preferences).length
+          ? this.normalizePreferences((llmParsed?.data as Record<string, unknown> | undefined)?.preferences, fallbackConstraints.preferences)
+          : fallbackConstraints.preferences
+    };
+    const content = llmParsed
+      ? `使用 ${llmParsed.model} 解析自然语言约束，并合并表单显式字段。`
+      : "未配置可用 LLM，使用启发式解析自然语言与表单约束。";
+    const event = this.event("THINK", content, state, "parse");
 
     return {
       constraints,
       weatherRisk: constraints.weatherRisk ?? "medium",
       events: [event],
       traceSteps: [{ type: "thought", content: event.content }],
+      llmModels: llmParsed ? [`${llmParsed.provider}:${llmParsed.model}`] : [],
       decisionLog: [
         `解析约束：城市=${constraints.city}，起点=${constraints.startPoint}，时长=${constraints.durationMinutes}分钟，预算=${constraints.budget}元`
       ]
@@ -148,10 +174,11 @@ export class CityWalkGraphRunner {
   }
 
   private async plannerNode(state: CityWalkGraphState): Promise<CityWalkGraphUpdate> {
-    const planSteps: AgentPlanStep[] = [
+    const llmPlan = await this.tryPlanStepsWithLlm(state.task, state.constraints);
+    const planSteps: AgentPlanStep[] = llmPlan?.data ?? [
       {
         id: "weather",
-        description: "查询天气预报、预警与生活指数，判断是否需要室内优先。",
+        description: "查询天气预报、预警、空气质量与生活指数，判断是否需要室内优先。",
         toolHint: "weather",
         dependsOn: [],
         status: "pending"
@@ -178,7 +205,11 @@ export class CityWalkGraphRunner {
         status: "pending"
       }
     ];
-    const event = this.event("PLAN", `生成 ${planSteps.length} 步动态计划：${planSteps.map((step) => step.description).join(" -> ")}`, state);
+    const event = this.event(
+      "PLAN",
+      `${llmPlan ? `使用 ${llmPlan.model}` : "使用默认规划器"}生成 ${planSteps.length} 步动态计划：${planSteps.map((step) => step.description).join(" -> ")}`,
+      state
+    );
 
     return {
       planSteps,
@@ -186,6 +217,7 @@ export class CityWalkGraphRunner {
       needsReplan: false,
       events: [event],
       traceSteps: [{ type: "thought", content: event.content }],
+      llmModels: llmPlan ? [`${llmPlan.provider}:${llmPlan.model}`] : [],
       decisionLog: ["Planner 生成高层计划，并将每一步交给 ReAct 执行器动态调用工具。"]
     };
   }
@@ -221,14 +253,14 @@ export class CityWalkGraphRunner {
     thought: StateEvent
   ): Promise<CityWalkGraphUpdate> {
     const input = { city: state.constraints.city };
-    const action = this.event("ACTION", "调用天气工具获取降雨概率、预警与生活指数。", state, step.id, {
-      tool: "get_weather_context",
+    const action = this.event("ACTION", "调用天气工具获取降雨概率、预警、空气质量与生活指数。", state, step.id, {
+      tool: "get_weather",
       input
     });
     const weather = await this.weatherTool.getWeatherContext(state.constraints.city);
     const weatherRisk = state.constraints.weatherRisk ?? weather.risk;
     const obs = this.event("OBS", `天气工具返回：${weather.summary}，风险=${weatherRisk}`, state, step.id, {
-      tool: "get_weather_context",
+      tool: "get_weather",
       input,
       output: weather
     });
@@ -241,8 +273,8 @@ export class CityWalkGraphRunner {
       events: [thought, action, obs],
       traceSteps: [
         { type: "thought", content: thought.content },
-        { type: "tool_call", tool: "get_weather_context", input },
-        { type: "tool_result", tool: "get_weather_context", output: weather }
+        { type: "tool_call", tool: "get_weather", input },
+        { type: "tool_result", tool: "get_weather", output: weather }
       ],
       decisionLog: [`天气风险更新为 ${weatherRisk}。`]
     };
@@ -263,7 +295,7 @@ export class CityWalkGraphRunner {
       indoorOnly
     };
     const action = this.event("ACTION", "调用地图 POI 工具搜索候选点。", state, step.id, {
-      tool: "search_nearby_poi",
+      tool: startLocation ? "search_poi_nearby" : "search_poi",
       input
     });
     const candidatePois = await this.mapTool.searchNearbyPoi(state.constraints.preferences, {
@@ -272,7 +304,7 @@ export class CityWalkGraphRunner {
       indoorOnly
     });
     const obs = this.event("OBS", `地图工具返回 ${candidatePois.length} 个候选点。`, state, step.id, {
-      tool: "search_nearby_poi",
+      tool: startLocation ? "search_poi_nearby" : "search_poi",
       input,
       output: candidatePois
     });
@@ -285,8 +317,8 @@ export class CityWalkGraphRunner {
       events: [thought, action, obs],
       traceSteps: [
         { type: "thought", content: thought.content },
-        { type: "tool_call", tool: "search_nearby_poi", input },
-        { type: "tool_result", tool: "search_nearby_poi", output: candidatePois }
+        { type: "tool_call", tool: startLocation ? "search_poi_nearby" : "search_poi", input },
+        { type: "tool_result", tool: startLocation ? "search_poi_nearby" : "search_poi", output: candidatePois }
       ],
       decisionLog: [`候选 POI 数量：${candidatePois.length}。`]
     };
@@ -303,13 +335,14 @@ export class CityWalkGraphRunner {
     const input = {
       origin: state.startLocation ?? state.constraints.startPoint,
       destinations,
-      mode: state.constraints.transportMode ?? "mixed"
+      mode: state.constraints.transportMode ?? "mixed",
+      city: state.constraints.city
     };
     const action = this.event("ACTION", "调用路径规划工具计算点位间耗时。", state, step.id, {
       tool: "plan_route",
       input
     });
-    const routeLegs = await this.mapTool.planRoute(input.origin, destinations, input.mode);
+    const routeLegs = await this.mapTool.planRoute(input.origin, destinations, input.mode, input.city);
     const routeMinutes = routeLegs.reduce((sum, leg) => sum + leg.durationMinutes, 0);
     const stayMinutes = selectedStops.reduce((sum, stop) => sum + stop.estimatedStayMinutes, 0);
     const totalEstimatedCost = selectedStops.reduce((sum, stop) => sum + stop.estimatedCost, 0);
@@ -418,6 +451,22 @@ export class CityWalkGraphRunner {
     return state.needsReplan ? "execute" : "synthesize";
   }
 
+  private async tryParseConstraintsWithLlm(task: string, rawInput: PlanRequest) {
+    try {
+      return await this.llmRouter.parseConstraints(task, rawInput);
+    } catch (error) {
+      return undefined;
+    }
+  }
+
+  private async tryPlanStepsWithLlm(task: string, constraints: UserConstraints) {
+    try {
+      return await this.llmRouter.planSteps(task, constraints);
+    } catch (error) {
+      return undefined;
+    }
+  }
+
   private parseConstraints(input: PlanRequest): UserConstraints {
     const task = input.task ?? "";
     const city = input.city ?? this.matchCity(task) ?? "南京";
@@ -438,6 +487,21 @@ export class CityWalkGraphRunner {
       weatherPreference,
       weatherRisk: input.weatherRisk
     };
+  }
+
+  private normalizePreferences(value: unknown, fallback: string[]): string[] {
+    if (Array.isArray(value)) {
+      const normalized = value.map((item) => String(item).trim()).filter(Boolean);
+      return normalized.length > 0 ? normalized : fallback;
+    }
+    if (typeof value === "string" && value.trim()) {
+      const normalized = value
+        .split(/[、,，\s]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      return normalized.length > 0 ? normalized : fallback;
+    }
+    return fallback;
   }
 
   private defaultConstraints(input: PlanRequest): UserConstraints {

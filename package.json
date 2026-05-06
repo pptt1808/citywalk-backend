@@ -8,7 +8,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:agent": "tsx scripts/run-agent-cases.ts"
   },
   "dependencies": {
     "@langchain/langgraph": "^1.3.0",

@@ -44,9 +44,12 @@ src/
    ```bash
    npm install
    ```
-2. 配置环境变量
-   ```bash
-   cp .env.example .env
+
+[//]: # (2. 配置环境变量)
+
+[//]: # (   ```bash)
+
+[//]: # (   cp .env.example .env)
    ```
 3. 启动开发服务
    ```bash

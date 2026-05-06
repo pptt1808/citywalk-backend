@@ -1,6 +1,19 @@
 import { env } from "../config/env";
 import { PoiCategory } from "../types/plan";
 
+type AmapPoi = {
+  name?: string;
+  type?: string;
+  address?: string;
+  location?: string;
+  distance?: string;
+  rating?: string;
+  biz_ext?: {
+    rating?: string;
+    cost?: string;
+  };
+};
+
 export interface Poi {
   name: string;
   category: PoiCategory;
@@ -17,25 +30,65 @@ export interface RouteLeg {
   destination: string;
   distanceMeters: number;
   durationMinutes: number;
-  mode: "walk" | "transit";
+  mode: "walk" | "transit" | "bicycling";
+}
+
+export interface DistanceMatrixItem {
+  origin: string;
+  destination: string;
+  distanceMeters: number;
+  durationMinutes: number;
 }
 
 export class MapTool {
+  private readonly amapBaseUrl = "https://restapi.amap.com";
+
   async geocode(address: string, city: string): Promise<string | undefined> {
     if (!env.AMAP_KEY) {
       return this.mockLocationFor(address);
     }
 
-    const data = await this.fetchWithRetry<{ geocodes?: Array<{ location?: string }> }>(
-      "https://restapi.amap.com/v3/geocode/geo",
-      {
-        key: env.AMAP_KEY,
+    try {
+      const data = await this.fetchAmapV3<{ geocodes?: Array<{ location?: string }> }>("/v3/geocode/geo", {
         address,
         city
-      }
+      });
+
+      return data.geocodes?.[0]?.location ?? this.mockLocationFor(address);
+    } catch {
+      return this.mockLocationFor(address);
+    }
+  }
+
+  async searchPoi(
+    keywords: string[],
+    options: {
+      city: string;
+      indoorOnly?: boolean;
+      page?: number;
+      offset?: number;
+    }
+  ): Promise<Poi[]> {
+    const normalizedKeywords = this.normalizeKeywords(keywords);
+    if (!env.AMAP_KEY) {
+      return this.filterMockPois(normalizedKeywords, options.indoorOnly);
+    }
+
+    const requests = normalizedKeywords.map((keyword) =>
+      this.fetchPoi("/v3/place/text", {
+        keywords: keyword,
+        city: options.city,
+        extensions: "all",
+        offset: String(options.offset ?? 10),
+        page: String(options.page ?? 1)
+      }, keyword)
     );
 
-    return data.geocodes?.[0]?.location ?? this.mockLocationFor(address);
+    const results = (await Promise.allSettled(requests))
+      .flatMap((item) => (item.status === "fulfilled" ? item.value : []))
+      .filter((poi) => !options.indoorOnly || poi.indoor);
+
+    return this.dedupePois(results.length > 0 ? results : this.filterMockPois(normalizedKeywords, options.indoorOnly));
   }
 
   async searchNearbyPoi(
@@ -45,15 +98,27 @@ export class MapTool {
       location?: string;
       indoorOnly?: boolean;
       radius?: number;
+      page?: number;
+      offset?: number;
     }
   ): Promise<Poi[]> {
-    const normalizedKeywords = keywords.length > 0 ? keywords : ["书店", "咖啡", "博物馆"];
+    const normalizedKeywords = this.normalizeKeywords(keywords);
+    if (!options.location) {
+      return this.searchPoi(normalizedKeywords, options);
+    }
     if (!env.AMAP_KEY) {
       return this.filterMockPois(normalizedKeywords, options.indoorOnly);
     }
 
     const requests = normalizedKeywords.map((keyword) =>
-      this.fetchPoiByKeyword(keyword, options.city, options.location, options.radius)
+      this.fetchPoi("/v3/place/around", {
+        location: options.location ?? "",
+        keywords: keyword,
+        radius: String(options.radius ?? 2000),
+        extensions: "all",
+        offset: String(options.offset ?? 10),
+        page: String(options.page ?? 1)
+      }, keyword)
     );
     const results = (await Promise.allSettled(requests))
       .flatMap((item) => (item.status === "fulfilled" ? item.value : []))
@@ -65,16 +130,17 @@ export class MapTool {
   async planRoute(
     origin: string,
     destinations: string[],
-    mode: "walk" | "transit" | "mixed"
+    mode: "walk" | "transit" | "mixed",
+    city: string
   ): Promise<RouteLeg[]> {
     if (destinations.length === 0) {
       return [];
     }
-
-    if (!env.AMAP_KEY || mode === "mixed") {
+    if (!env.AMAP_KEY) {
       return this.mockRoute(origin, destinations, mode === "transit" ? "transit" : "walk");
     }
 
+    const routeMode = mode === "mixed" ? "walk" : mode;
     const legs: RouteLeg[] = [];
     let current = origin;
     for (const destination of destinations) {
@@ -83,27 +149,12 @@ export class MapTool {
       }
 
       try {
-        const endpoint =
-          mode === "transit"
-            ? "https://restapi.amap.com/v3/direction/transit/integrated"
-            : "https://restapi.amap.com/v3/direction/walking";
-        const data = await this.fetchWithRetry<Record<string, any>>(endpoint, {
-          key: env.AMAP_KEY,
-          origin: current,
-          destination,
-          city: "南京"
-        });
-        const distance = Number(data.route?.paths?.[0]?.distance ?? data.route?.transits?.[0]?.distance ?? 1200);
-        const duration = Number(data.route?.paths?.[0]?.duration ?? data.route?.transits?.[0]?.duration ?? 1200);
-        legs.push({
-          origin: current,
-          destination,
-          distanceMeters: distance,
-          durationMinutes: Math.max(1, Math.round(duration / 60)),
-          mode
-        });
+        const leg = routeMode === "transit"
+          ? await this.planTransitRoute(current, destination, city)
+          : await this.planWalkingRoute(current, destination);
+        legs.push(leg);
       } catch {
-        legs.push(...this.mockRoute(current, [destination], mode));
+        legs.push(...this.mockRoute(current, [destination], routeMode));
       }
 
       current = destination;
@@ -112,44 +163,141 @@ export class MapTool {
     return legs;
   }
 
-  private async fetchPoiByKeyword(
-    keyword: string,
-    city: string,
-    location?: string,
-    radius = 3000
-  ): Promise<Poi[]> {
-    const endpoint = location
-      ? "https://restapi.amap.com/v3/place/around"
-      : "https://restapi.amap.com/v3/place/text";
-    const data = await this.fetchWithRetry<{ pois?: Array<Record<string, any>> }>(endpoint, {
-      key: env.AMAP_KEY ?? "",
-      keywords: keyword,
-      city,
-      location: location ?? "",
-      radius: String(radius),
-      offset: "10",
-      extensions: "all"
+  async planBicyclingRoute(origin: string, destination: string): Promise<RouteLeg> {
+    if (!env.AMAP_KEY) {
+      return this.mockRoute(origin, [destination], "bicycling")[0];
+    }
+
+    const data = await this.fetchAmapV4<{
+      data?: { paths?: Array<{ distance?: number | string; duration?: number | string }> };
+    }>("/v4/direction/bicycling", {
+      origin,
+      destination
+    });
+    const path = data.data?.paths?.[0];
+    return {
+      origin,
+      destination,
+      distanceMeters: Number(path?.distance ?? 1200),
+      durationMinutes: Math.max(1, Math.round(Number(path?.duration ?? 900) / 60)),
+      mode: "bicycling"
+    };
+  }
+
+  async distanceMatrix(
+    origins: string[],
+    destination: string,
+    type: "walk" | "bicycling" = "walk"
+  ): Promise<DistanceMatrixItem[]> {
+    if (origins.length === 0) {
+      return [];
+    }
+    if (!env.AMAP_KEY) {
+      return origins.map((origin, index) => ({
+        origin,
+        destination,
+        distanceMeters: 900 + index * 250,
+        durationMinutes: type === "bicycling" ? 6 + index * 2 : 12 + index * 3
+      }));
+    }
+
+    const data = await this.fetchAmapV3<{
+      results?: Array<{ origin_id?: string; distance?: string; duration?: string }>;
+    }>("/v3/distance", {
+      origins: origins.join("|"),
+      destination,
+      type: type === "bicycling" ? "3" : "1"
     });
 
-    return (data.pois ?? []).map((item) => {
-      const category = this.inferCategory(`${item.name ?? ""}${item.type ?? ""}${keyword}`);
-      return {
-        name: String(item.name ?? keyword),
-        category,
-        averageCost: this.estimateCost(category, Number(item.biz_ext?.cost ?? 0)),
-        location: typeof item.location === "string" ? item.location : undefined,
-        address: typeof item.address === "string" ? item.address : undefined,
-        rating: Number(item.biz_ext?.rating ?? 4.2),
-        distanceMeters: Number(item.distance ?? 0),
-        indoor: this.isIndoorCategory(category)
-      };
+    return (data.results ?? []).map((item, index) => ({
+      origin: origins[Number(item.origin_id ?? index + 1) - 1] ?? origins[index],
+      destination,
+      distanceMeters: Number(item.distance ?? 0),
+      durationMinutes: Math.max(1, Math.round(Number(item.duration ?? 0) / 60))
+    }));
+  }
+
+  private async planWalkingRoute(origin: string, destination: string): Promise<RouteLeg> {
+    const data = await this.fetchAmapV3<{
+      route?: { paths?: Array<{ distance?: string; duration?: string }> };
+    }>("/v3/direction/walking", {
+      origin,
+      destination
     });
+    const path = data.route?.paths?.[0];
+    return {
+      origin,
+      destination,
+      distanceMeters: Number(path?.distance ?? 1200),
+      durationMinutes: Math.max(1, Math.round(Number(path?.duration ?? 900) / 60)),
+      mode: "walk"
+    };
+  }
+
+  private async planTransitRoute(origin: string, destination: string, city: string): Promise<RouteLeg> {
+    const data = await this.fetchAmapV3<{
+      route?: { transits?: Array<{ distance?: string; duration?: string }> };
+    }>("/v3/direction/transit/integrated", {
+      origin,
+      destination,
+      city
+    });
+    const transit = data.route?.transits?.[0];
+    return {
+      origin,
+      destination,
+      distanceMeters: Number(transit?.distance ?? 3000),
+      durationMinutes: Math.max(1, Math.round(Number(transit?.duration ?? 1500) / 60)),
+      mode: "transit"
+    };
+  }
+
+  private async fetchPoi(path: string, query: Record<string, string>, keyword: string): Promise<Poi[]> {
+    const data = await this.fetchAmapV3<{ pois?: AmapPoi[] }>(path, query);
+    return (data.pois ?? []).map((item) => this.normalizePoi(item, keyword));
+  }
+
+  private normalizePoi(item: AmapPoi, keyword: string): Poi {
+    const category = this.inferCategory(`${item.name ?? ""}${item.type ?? ""}${keyword}`);
+    const rating = Number(item.biz_ext?.rating ?? item.rating ?? 4.2);
+    return {
+      name: String(item.name ?? keyword),
+      category,
+      averageCost: this.estimateCost(category, Number(item.biz_ext?.cost ?? 0)),
+      location: item.location,
+      address: item.address,
+      rating: Number.isFinite(rating) ? rating : 4.2,
+      distanceMeters: Number(item.distance ?? 0),
+      indoor: this.isIndoorCategory(category)
+    };
+  }
+
+  private async fetchAmapV3<T>(path: string, query: Record<string, string>, retries = 2): Promise<T> {
+    const data = await this.fetchWithRetry<T & { status?: string; info?: string }>(
+      `${this.amapBaseUrl}${path}`,
+      { key: env.AMAP_KEY ?? "", ...query },
+      retries
+    );
+    if (data.status === "0") {
+      throw new Error(data.info ?? "AMap API failed");
+    }
+    return data;
+  }
+
+  private async fetchAmapV4<T>(path: string, query: Record<string, string>, retries = 2): Promise<T> {
+    const data = await this.fetchWithRetry<T & { errcode?: number; errmsg?: string }>(
+      `${this.amapBaseUrl}${path}`,
+      { key: env.AMAP_KEY ?? "", ...query },
+      retries
+    );
+    if (typeof data.errcode === "number" && data.errcode !== 0) {
+      throw new Error(data.errmsg ?? "AMap v4 API failed");
+    }
+    return data;
   }
 
   private async fetchWithRetry<T>(url: string, query: Record<string, string>, retries = 2): Promise<T> {
-    const search = new URLSearchParams(
-      Object.entries(query).filter(([, value]) => value !== "")
-    );
+    const search = new URLSearchParams(Object.entries(query).filter(([, value]) => value !== ""));
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -158,11 +306,7 @@ export class MapTool {
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
-        const data = (await response.json()) as T & { status?: string; info?: string };
-        if (data.status === "0") {
-          throw new Error(data.info ?? "AMap API failed");
-        }
-        return data;
+        return (await response.json()) as T;
       } catch (error) {
         lastError = error;
         await this.delay(300 * 2 ** attempt);
@@ -191,12 +335,26 @@ export class MapTool {
     return matched.length > 0 ? matched : candidates.filter((item) => !indoorOnly || item.indoor);
   }
 
-  private mockRoute(origin: string, destinations: string[], mode: "walk" | "transit"): RouteLeg[] {
+  private normalizeKeywords(keywords: string[] | unknown): string[] {
+    if (Array.isArray(keywords)) {
+      const normalized = keywords.map((keyword) => String(keyword).trim()).filter(Boolean);
+      return normalized.length > 0 ? normalized : ["书店", "咖啡", "博物馆"];
+    }
+    if (typeof keywords === "string" && keywords.trim()) {
+      return keywords
+        .split(/[、,，\s]+/)
+        .map((keyword) => keyword.trim())
+        .filter(Boolean);
+    }
+    return ["书店", "咖啡", "博物馆"];
+  }
+
+  private mockRoute(origin: string, destinations: string[], mode: "walk" | "transit" | "bicycling"): RouteLeg[] {
     return destinations.map((destination, index) => ({
       origin: index === 0 ? origin : destinations[index - 1],
       destination,
       distanceMeters: 800 + index * 350,
-      durationMinutes: mode === "transit" ? 12 + index * 4 : 14 + index * 6,
+      durationMinutes: mode === "transit" ? 12 + index * 4 : mode === "bicycling" ? 6 + index * 3 : 14 + index * 6,
       mode
     }));
   }
