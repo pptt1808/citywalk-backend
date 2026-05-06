@@ -4,15 +4,84 @@ export interface UserConstraints {
   durationMinutes: number;
   budget: number;
   preferences: string[];
+  peopleCount?: number;
+  transportMode?: "walk" | "transit" | "mixed";
+  weatherPreference?: "avoid_rain" | "indoor_first" | "outdoor_ok";
+  weatherRisk?: "low" | "medium" | "high";
+}
+
+export interface PlanRequest {
+  task?: string;
+  city?: string;
+  startPoint?: string;
+  durationMinutes?: number;
+  budget?: number;
+  preferences?: string[];
+  peopleCount?: number;
+  transportMode?: "walk" | "transit" | "mixed";
+  weatherPreference?: "avoid_rain" | "indoor_first" | "outdoor_ok";
   weatherRisk?: "low" | "medium" | "high";
 }
 
 export interface RouteStop {
   name: string;
-  category: "bookstore" | "cafe" | "sight";
+  category: PoiCategory;
   estimatedCost: number;
   estimatedStayMinutes: number;
   reason: string;
+  location?: string;
+  address?: string;
+  rating?: number;
+  distanceMeters?: number;
+}
+
+export type PoiCategory = "bookstore" | "cafe" | "sight" | "museum" | "mall" | "park" | "restaurant";
+
+export interface AgentPlanStep {
+  id: string;
+  description: string;
+  toolHint: "weather" | "poi_search" | "route_plan" | "constraint_check";
+  dependsOn: string[];
+  status: "pending" | "running" | "completed" | "failed";
+}
+
+export type StateEventType = "PLAN" | "THINK" | "ACTION" | "OBS" | "REFLECT" | "RESULT" | "ERROR";
+
+export interface StateEvent {
+  event_type: StateEventType;
+  step_id?: string;
+  total_steps?: number;
+  content: string;
+  tool_call?: {
+    tool: string;
+    input?: Record<string, unknown>;
+    output?: unknown;
+  };
+  timestamp: string;
+  context_snapshot?: Record<string, unknown>;
+}
+
+export type TraceStepType = "thought" | "tool_call" | "tool_result" | "final_answer";
+
+export interface TraceStep {
+  type: TraceStepType;
+  content?: string;
+  tool?: string;
+  input?: Record<string, unknown>;
+  output?: unknown;
+}
+
+export interface AgentTrace {
+  task: string;
+  steps: TraceStep[];
+  metadata?: {
+    model?: string;
+    agent_version?: string;
+    total_tokens?: number;
+    response_time_ms?: number;
+    agent_id?: string;
+    [key: string]: unknown;
+  };
 }
 
 export interface PlanningResult {
@@ -21,4 +90,9 @@ export interface PlanningResult {
   totalEstimatedMinutes: number;
   stops: RouteStop[];
   decisionLog: string[];
+  planSteps?: AgentPlanStep[];
+  events?: StateEvent[];
+  trace?: AgentTrace;
+  weatherRisk?: "low" | "medium" | "high";
+  corrections?: string[];
 }

@@ -1,6 +1,7 @@
 import { Router } from "express";
-import { createPlanHandler } from "../controllers/planController";
+import { createAgentTraceHandler, createPlanHandler } from "../controllers/planController";
 
 export const planRouter = Router();
 
 planRouter.post("/", createPlanHandler);
+planRouter.post("/trace", createAgentTraceHandler);
