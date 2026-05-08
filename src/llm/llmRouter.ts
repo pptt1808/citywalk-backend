@@ -39,8 +39,8 @@ export class LlmRouter {
     thinking: true
   };
 
-  async parseConstraints(task: string, rawInput: PlanRequest): Promise<LlmJsonResult<Partial<UserConstraints>> | undefined> {
-    const model = this.selectModel(task, "parse");
+  async parseConstraints(task: string, rawInput: PlanRequest, preferredModel?: "flash" | "pro"): Promise<LlmJsonResult<Partial<UserConstraints>> | undefined> {
+    const model = this.selectModel(task, "parse", preferredModel ?? rawInput.preferredModel);
     if (!model.apiKey) {
       return undefined;
     }
@@ -60,8 +60,8 @@ export class LlmRouter {
     return { provider: model.provider, model: model.model, data };
   }
 
-  async planSteps(task: string, constraints: UserConstraints): Promise<LlmJsonResult<AgentPlanStep[]> | undefined> {
-    const model = this.selectModel(`${task} ${constraints.preferences.join(" ")}`, "plan");
+  async planSteps(task: string, constraints: UserConstraints, preferredModel?: "flash" | "pro"): Promise<LlmJsonResult<AgentPlanStep[]> | undefined> {
+    const model = this.selectModel(`${task} ${constraints.preferences.join(" ")}`, "plan", preferredModel);
     if (!model.apiKey) {
       return undefined;
     }
@@ -85,7 +85,12 @@ export class LlmRouter {
     };
   }
 
-  private selectModel(task: string, stage: "parse" | "plan"): LlmModelConfig {
+  private selectModel(task: string, stage: "parse" | "plan", override?: "flash" | "pro"): LlmModelConfig {
+    // Hard override from frontend model selector
+    if (override === "flash" && this.primary.apiKey) return this.primary;
+    if (override === "pro"   && this.advanced.apiKey) return this.advanced;
+
+    // Automatic routing
     const useAdvanced = this.isComplexTask(task) || this.hashBucket(`${stage}:${task}`) < env.LLM_ADVANCED_RATIO;
     if (useAdvanced && this.advanced.apiKey) {
       return this.advanced;

@@ -21,6 +21,8 @@ export interface PlanRequest {
   transportMode?: "walk" | "transit" | "mixed";
   weatherPreference?: "avoid_rain" | "indoor_first" | "outdoor_ok";
   weatherRisk?: "low" | "medium" | "high";
+  /** Frontend model selector: 'flash' = deepseek-v4-flash, 'pro' = deepseek-v4-pro */
+  preferredModel?: "flash" | "pro";
 }
 
 export interface RouteStop {

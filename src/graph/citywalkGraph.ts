@@ -174,7 +174,7 @@ export class CityWalkGraphRunner {
   }
 
   private async plannerNode(state: CityWalkGraphState): Promise<CityWalkGraphUpdate> {
-    const llmPlan = await this.tryPlanStepsWithLlm(state.task, state.constraints);
+    const llmPlan = await this.tryPlanStepsWithLlm(state.task, state.constraints, state.rawInput.preferredModel);
     const planSteps: AgentPlanStep[] = llmPlan?.data ?? [
       {
         id: "weather",
@@ -453,15 +453,15 @@ export class CityWalkGraphRunner {
 
   private async tryParseConstraintsWithLlm(task: string, rawInput: PlanRequest) {
     try {
-      return await this.llmRouter.parseConstraints(task, rawInput);
+      return await this.llmRouter.parseConstraints(task, rawInput, rawInput.preferredModel);
     } catch (error) {
       return undefined;
     }
   }
 
-  private async tryPlanStepsWithLlm(task: string, constraints: UserConstraints) {
+  private async tryPlanStepsWithLlm(task: string, constraints: UserConstraints, preferredModel?: "flash" | "pro") {
     try {
-      return await this.llmRouter.planSteps(task, constraints);
+      return await this.llmRouter.planSteps(task, constraints, preferredModel);
     } catch (error) {
       return undefined;
     }
