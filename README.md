@@ -26,17 +26,29 @@ src/
     index.ts
     health.ts
     plan.ts
+    agent.ts                 # /api/agent/*（trace、SSE 流）
   controllers/
     planController.ts
   services/
     plannerService.ts
   agents/
     urbanPulseAgent.ts
+  graph/
+    citywalkGraph.ts         
+  llm/
+    llmRouter.ts
   tools/
     mapTool.ts
     weatherTool.ts
   types/
     plan.ts
+  utils/
+    stateEventWire.ts        # SSE 载荷截断
+public/                      
+scripts/
+  run-agent-cases.ts
+  agent-state-cli.ts         # F-04 终端可视化
+frontend/                   
 ```
 
 ## 本地启动
