@@ -9,6 +9,7 @@ export function createApp() {
   app.use(cors());
   app.use(express.json());
   app.use("/api", apiRouter);
+  app.use("/static", express.static(path.resolve(process.cwd(), "public")));
 
   // In production (CI/CD), the built frontend dist is served by Nginx at /var/www/citywalk/.
   // When running locally with NODE_ENV=production (optional), Express can also serve it.

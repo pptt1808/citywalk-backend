@@ -1,5 +1,5 @@
 import { CityWalkGraphRunner } from "../graph/citywalkGraph";
-import { PlanningResult, PlanRequest, UserConstraints } from "../types/plan";
+import { PlanningResult, PlanRequest, StateEvent, UserConstraints } from "../types/plan";
 import { MapTool } from "../tools/mapTool";
 import { WeatherTool } from "../tools/weatherTool";
 
@@ -15,5 +15,9 @@ export class UrbanPulseAgent {
 
   async plan(input: UserConstraints | PlanRequest): Promise<PlanningResult> {
     return this.graphRunner.run(input);
+  }
+
+  async planWithStateEventStream(input: PlanRequest, onDelta: (events: StateEvent[]) => void): Promise<PlanningResult> {
+    return this.graphRunner.streamStateEvents(input, onDelta);
   }
 }

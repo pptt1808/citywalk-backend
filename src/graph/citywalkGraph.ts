@@ -63,10 +63,41 @@ export class CityWalkGraphRunner {
   ) {}
 
   async run(input: PlanRequest): Promise<PlanningResult> {
-    const task = input.task ?? this.describeStructuredInput(input);
     const graph = this.buildGraph();
     const startedAt = Date.now();
-    const initialState: CityWalkGraphState = {
+    const initialState = this.buildInitialState(input);
+    const state = await graph.invoke(initialState, { recursionLimit: 30 });
+    return this.stateToPlanningResult(state, startedAt);
+  }
+
+  /**
+   * Runs the graph while emitting each batch of new {@link StateEvent} entries as nodes complete.
+   * Used for SSE / real-time visualization (F-04).
+   */
+  async streamStateEvents(input: PlanRequest, onDelta: (events: StateEvent[]) => void): Promise<PlanningResult> {
+    const graph = this.buildGraph();
+    const startedAt = Date.now();
+    const initialState = this.buildInitialState(input);
+    let prevEventLen = 0;
+    const stream = await graph.stream(initialState, { streamMode: "values", recursionLimit: 30 });
+    let lastState: CityWalkGraphState | undefined;
+    for await (const chunk of stream) {
+      lastState = chunk as CityWalkGraphState;
+      const all = lastState.events ?? [];
+      if (all.length > prevEventLen) {
+        onDelta(all.slice(prevEventLen));
+        prevEventLen = all.length;
+      }
+    }
+    if (!lastState) {
+      throw new Error("CityWalk graph stream produced no state");
+    }
+    return this.stateToPlanningResult(lastState, startedAt);
+  }
+
+  private buildInitialState(input: PlanRequest): CityWalkGraphState {
+    const task = input.task ?? this.describeStructuredInput(input);
+    return {
       task,
       rawInput: input,
       constraints: this.defaultConstraints(input),
@@ -89,8 +120,9 @@ export class CityWalkGraphRunner {
       corrections: [],
       llmModels: []
     };
+  }
 
-    const state = await graph.invoke(initialState, { recursionLimit: 30 });
+  private stateToPlanningResult(state: CityWalkGraphState, startedAt: number): PlanningResult {
     const responseTimeMs = Date.now() - startedAt;
     const finalAnswer = state.finalAnswer || this.buildFinalAnswer(state);
     const traceSteps = state.traceSteps.concat([{ type: "final_answer", content: finalAnswer }]);
@@ -106,7 +138,7 @@ export class CityWalkGraphRunner {
       weatherRisk: state.weatherRisk,
       corrections: state.corrections,
       trace: {
-        task,
+        task: state.task,
         steps: traceSteps,
         metadata: {
           model: state.llmModels.at(-1) ?? "heuristic-planner-langgraph-js",
