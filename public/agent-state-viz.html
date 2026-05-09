@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CityWalk Agent 状态流 (F-04)</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --plan: #58a6ff;
+      --think: #f0f6fc;
+      --action: #d29922;
+      --obs: #3fb950;
+      --reflect: #f85149;
+      --result: #39d0d6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+    .toolbar {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .toolbar input, .toolbar button {
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+    }
+    .toolbar button {
+      cursor: pointer;
+      background: #238636;
+      border-color: #238636;
+      font-weight: 600;
+    }
+    .toolbar button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 200px 1fr 280px;
+      gap: 0;
+      min-height: calc(100vh - 56px);
+    }
+    @media (max-width: 960px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+    .col {
+      border-right: 1px solid var(--border);
+      padding: 12px;
+      overflow: auto;
+    }
+    .col:last-child { border-right: none; }
+    .phase {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      margin-bottom: 6px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .phase.done { opacity: 0.75; }
+    .phase.active {
+      outline: 2px solid var(--plan);
+      background: rgba(88, 166, 255, 0.08);
+    }
+    .phase .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+    .phase.plan .dot { background: var(--plan); }
+    .phase.think .dot { background: var(--think); }
+    .phase.action .dot { background: var(--action); }
+    .phase.obs .dot { background: var(--obs); }
+    .phase.reflect .dot { background: var(--reflect); }
+    .phase.result .dot { background: var(--result); }
+    .stream {
+      font-family: ui-monospace, "Cascadia Code", monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      max-height: calc(100vh - 80px);
+      overflow-y: auto;
+      padding: 8px;
+      background: var(--panel);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .ev {
+      margin-bottom: 10px;
+      padding: 8px;
+      border-left: 3px solid var(--border);
+      border-radius: 4px;
+      background: rgba(255,255,255,0.02);
+    }
+    .ev.PLAN { border-left-color: var(--plan); }
+    .ev.THINK { border-left-color: var(--muted); }
+    .ev.ACTION { border-left-color: var(--action); }
+    .ev.OBS { border-left-color: var(--obs); }
+    .ev.REFLECT { border-left-color: var(--reflect); }
+    .ev.RESULT { border-left-color: var(--result); }
+    .ev .tag {
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .ev.PLAN .tag { color: var(--plan); }
+    .ev.THINK .tag { color: var(--think); }
+    .ev.ACTION .tag { color: var(--action); }
+    .ev.OBS .tag { color: var(--obs); }
+    .ev.REFLECT .tag { color: var(--reflect); }
+    .ev.RESULT .tag { color: var(--result); }
+    .meta { color: var(--muted); font-size: 11px; margin-top: 4px; }
+    pre.tool {
+      margin: 6px 0 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--muted);
+    }
+    .cards { display: flex; flex-direction: column; gap: 8px; }
+    .card {
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      font-size: 13px;
+    }
+    .ring-row {
+      display: flex;
+      gap: 16px;
+      margin-top: 8px;
+    }
+    .ring {
+      position: relative;
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      background: conic-gradient(var(--plan) calc(var(--p) * 1%), var(--border) 0);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .ring span {
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      text-align: center;
+      padding: 4px;
+    }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <h1>Agent 状态流</h1>
+    <input type="text" id="task" size="48" placeholder="自然语言 task（可选）" />
+    <input type="text" id="city" size="8" placeholder="城市" value="南京" />
+    <input type="text" id="start" size="10" placeholder="起点" value="新街口" />
+    <input type="number" id="budget" placeholder="预算" value="200" style="width:72px" />
+    <input type="number" id="duration" placeholder="分钟" value="180" style="width:72px" />
+    <button type="button" id="run">运行并订阅 SSE</button>
+    <span class="hint" id="status">打开本页前请先启动后端；GET <code>/api/agent/trace/stream</code></span>
+  </div>
+  <div class="layout">
+    <div class="col">
+      <div id="phases"></div>
+    </div>
+    <div class="col">
+      <div class="stream" id="stream"></div>
+    </div>
+    <div class="col">
+      <div class="cards" id="context">
+        <div class="card" id="ctx-budget">等待事件…</div>
+        <div class="card" id="ctx-pois"><strong>已选 POI</strong><div id="poi-list" class="hint">—</div></div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const PHASES = [
+      { type: "PLAN", label: "PLAN", cls: "plan" },
+      { type: "THINK", label: "THINK", cls: "think" },
+      { type: "ACTION", label: "ACTION", cls: "action" },
+      { type: "OBS", label: "OBS", cls: "obs" },
+      { type: "REFLECT", label: "REFLECT", cls: "reflect" },
+      { type: "RESULT", label: "RESULT", cls: "result" }
+    ];
+
+    const phasesEl = document.getElementById("phases");
+    const streamEl = document.getElementById("stream");
+    const ctxBudget = document.getElementById("ctx-budget");
+    const poiList = document.getElementById("poi-list");
+    const statusEl = document.getElementById("status");
+
+    function renderPhases(activeType) {
+      const order = PHASES.map((p) => p.type);
+      const activeIdx = activeType ? order.indexOf(activeType) : -1;
+      phasesEl.innerHTML = PHASES.map((p, i) => {
+        const done = activeIdx > i || (activeType === "RESULT" && p.type === "RESULT");
+        const active = p.type === activeType;
+        const check = done ? " ✓" : "";
+        return `<div class="phase ${p.cls} ${done ? "done" : ""} ${active ? "active" : ""}" data-t="${p.type}">
+          <span class="dot"></span><span>${p.label}${check}</span>
+        </div>`;
+      }).join("");
+    }
+
+    function appendEvent(ev) {
+      const div = document.createElement("div");
+      div.className = "ev " + ev.event_type;
+      const tool = ev.tool_call
+        ? `<pre class="tool">${escapeHtml(JSON.stringify(ev.tool_call, null, 2))}</pre>`
+        : "";
+      div.innerHTML = `<div><span class="tag">[${ev.event_type}]</span> ${escapeHtml(ev.content)}</div>
+        <div class="meta">${escapeHtml(ev.timestamp || "")}${ev.step_id ? " · step " + escapeHtml(ev.step_id) : ""}</div>${tool}`;
+      streamEl.appendChild(div);
+      streamEl.scrollTop = streamEl.scrollHeight;
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function updateContext(snap) {
+      if (!snap) return;
+      const budget = snap.budget;
+      const used = snap.used_budget;
+      const dur = snap.duration_minutes;
+      const usedMin = snap.used_minutes;
+      const bp = budget ? Math.min(100, Math.round((Number(used) / Number(budget)) * 100)) : 0;
+      const tp = dur ? Math.min(100, Math.round((Number(usedMin) / Number(dur)) * 100)) : 0;
+      ctxBudget.innerHTML = `<strong>预算 / 时间</strong>
+        <div class="ring-row">
+          <div class="ring" style="--p:${bp}"><span>预算<br>${used ?? "—"}/${budget ?? "—"}</span></div>
+          <div class="ring" style="--p:${tp}"><span>时长<br>${usedMin ?? "—"}/${dur ?? "—"}分</span></div>
+        </div>
+        <div class="hint">天气风险：${escapeHtml(String(snap.weather_risk ?? "—"))}</div>`;
+      const pois = snap.selected_pois;
+      poiList.innerHTML = Array.isArray(pois) && pois.length
+        ? "<ul style='margin:6px 0 0 16px;padding:0'>" + pois.map((n) => "<li>" + escapeHtml(n) + "</li>").join("") + "</ul>"
+        : "（尚无）";
+    }
+
+    let es;
+    document.getElementById("run").addEventListener("click", () => {
+      if (es) {
+        es.close();
+        es = undefined;
+      }
+      streamEl.innerHTML = "";
+      renderPhases(null);
+
+      const task = document.getElementById("task").value.trim();
+      const city = document.getElementById("city").value.trim();
+      const start = document.getElementById("start").value.trim();
+      const budget = document.getElementById("budget").value;
+      const duration = document.getElementById("duration").value;
+      const params = new URLSearchParams();
+      if (task) params.set("task", task);
+      if (city) params.set("city", city);
+      if (start) params.set("startPoint", start);
+      if (budget) params.set("budget", budget);
+      if (duration) params.set("durationMinutes", duration);
+
+      if (!task && !start) {
+        statusEl.textContent = "请填写 task 或起点 startPoint";
+        return;
+      }
+
+      const url = "/api/agent/trace/stream?" + params.toString();
+      statusEl.textContent = "连接中…";
+      es = new EventSource(url);
+
+      es.addEventListener("state", (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          (data.events || []).forEach((ev) => {
+            appendEvent(ev);
+            renderPhases(ev.event_type);
+            updateContext(ev.context_snapshot);
+          });
+        } catch (err) {
+          console.error(err);
+        }
+      });
+
+      es.addEventListener("done", (e) => {
+        statusEl.textContent = "完成";
+        try {
+          const data = JSON.parse(e.data);
+          if (data.result && data.result.summary) {
+            const div = document.createElement("div");
+            div.className = "ev RESULT";
+            div.innerHTML = `<div class="tag">[RESULT 摘要]</div><div>${escapeHtml(data.result.summary)}</div>`;
+            streamEl.appendChild(div);
+          }
+        } catch (_) { /* ignore */ }
+        es.close();
+      });
+
+      es.addEventListener("stream_error", (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          statusEl.textContent = "错误: " + (d.message || e.data);
+        } catch {
+          statusEl.textContent = "流错误";
+        }
+        es.close();
+      });
+
+      es.onerror = () => {
+        if (es.readyState === EventSource.CLOSED) return;
+        statusEl.textContent = "连接中断（请确认后端已启动且路径正确）";
+      };
+    });
+
+    renderPhases(null);
+  </script>
+</body>
+</html>
