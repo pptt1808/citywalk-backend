@@ -62,6 +62,24 @@ deploy:
     - cp -r frontend/dist/* /var/www/citywalk/
     - cp -r dist /opt/citywalk/
     - cp package.json /opt/citywalk/
+    # 从 CI/CD Variables 生成 .env 文件
+    - |
+      cat > /opt/citywalk/.env << 'ENVEOF'
+      PORT=3000
+      NODE_ENV=production
+      AMAP_KEY=${AMAP_KEY}
+      QWEATHER_KEY=${QWEATHER_KEY}
+      DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      DEEPSEEK_FLASH_API_KEY=${DEEPSEEK_FLASH_API_KEY}
+      DEEPSEEK_FLASH_BASE_URL=https://api.deepseek.com
+      DEEPSEEK_FLASH_MODEL=deepseek-v4-flash
+      DEEPSEEK_PRO_API_KEY=${DEEPSEEK_PRO_API_KEY}
+      DEEPSEEK_PRO_BASE_URL=https://api.deepseek.com
+      DEEPSEEK_PRO_MODEL=deepseek-v4-pro
+      DEEPSEEK_CHAT_COMPLETIONS_PATH=/chat/completions
+      LLM_ADVANCED_RATIO=0.2
+      LLM_TIMEOUT_MS=30000
+      ENVEOF
     - cd /opt/citywalk && npm install --production --registry https://registry.npmmirror.com
     - pkill -f 'node.*dist/server' || true
     - nohup node dist/server.js > /opt/citywalk/app.log 2>&1 &
