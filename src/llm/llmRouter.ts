@@ -49,7 +49,7 @@ export class LlmRouter {
       {
         role: "system",
         content:
-          "你是 CityWalk Pulse 的约束解析器。只输出 JSON，不要 Markdown。字段包括 city,startPoint,durationMinutes,budget,preferences,peopleCount,transportMode,weatherPreference,weatherRisk。缺失字段不要编造得过细，可使用合理默认值。"
+          "你是 CityWalk Pulse 的约束解析器。只输出 JSON，不要 Markdown。字段包括 city,startPoint,durationMinutes,budget,preferences,peopleCount,transportMode,weatherPreference,weatherRisk。关键规则：city 必须从用户输入中提取实际提到的城市名，如果输入明确提到了城市就提取它，不要替换为其他城市。确实找不到城市时才省略该字段或使用空值，严禁一律填"南京"。"
       },
       {
         role: "user",

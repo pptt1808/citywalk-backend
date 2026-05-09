@@ -143,18 +143,50 @@ export class CityWalkGraphRunner {
   private async parseNode(state: CityWalkGraphState): Promise<CityWalkGraphUpdate> {
     const fallbackConstraints = this.parseConstraints(state.rawInput);
     const llmParsed = await this.tryParseConstraintsWithLlm(state.task, state.rawInput);
-    const constraints = {
-      ...fallbackConstraints,
-      ...llmParsed?.data,
-      city: state.rawInput.city ?? llmParsed?.data.city ?? fallbackConstraints.city,
-      startPoint: state.rawInput.startPoint ?? llmParsed?.data.startPoint ?? fallbackConstraints.startPoint,
-      durationMinutes: state.rawInput.durationMinutes ?? llmParsed?.data.durationMinutes ?? fallbackConstraints.durationMinutes,
-      budget: state.rawInput.budget ?? llmParsed?.data.budget ?? fallbackConstraints.budget,
-      preferences: state.rawInput.preferences?.length
-        ? state.rawInput.preferences
-        : this.normalizePreferences((llmParsed?.data as Record<string, unknown> | undefined)?.preferences, fallbackConstraints.preferences).length
-          ? this.normalizePreferences((llmParsed?.data as Record<string, unknown> | undefined)?.preferences, fallbackConstraints.preferences)
-          : fallbackConstraints.preferences
+
+    // Priority: explicit frontend field > heuristic match (reliable) > LLM extraction > hardcoded default
+    // Heuristic matchCity() is a deterministic string match — it beats LLM which may
+    // hallucinate or default to "南京" when the prompt says "可使用合理默认值".
+    const matchedCity = this.matchCity(state.task);
+    const city = state.rawInput.city
+      ?? matchedCity
+      ?? (llmParsed?.data as Record<string, unknown> | undefined)?.city as string | undefined
+      ?? fallbackConstraints.city;
+
+    const matchedStart = this.matchStartPoint(state.task);
+    const startPoint = state.rawInput.startPoint
+      ?? matchedStart
+      ?? llmParsed?.data.startPoint
+      ?? fallbackConstraints.startPoint;
+
+    const matchedDuration = this.matchDuration(state.task);
+    const durationMinutes = state.rawInput.durationMinutes
+      ?? matchedDuration
+      ?? llmParsed?.data.durationMinutes
+      ?? fallbackConstraints.durationMinutes;
+
+    const matchedBudget = this.matchBudget(state.task);
+    const budget = state.rawInput.budget
+      ?? matchedBudget
+      ?? llmParsed?.data.budget
+      ?? fallbackConstraints.budget;
+
+    const preferences = state.rawInput.preferences?.length
+      ? state.rawInput.preferences
+      : this.normalizePreferences((llmParsed?.data as Record<string, unknown> | undefined)?.preferences, fallbackConstraints.preferences).length
+        ? this.normalizePreferences((llmParsed?.data as Record<string, unknown> | undefined)?.preferences, fallbackConstraints.preferences)
+        : fallbackConstraints.preferences;
+
+    const constraints: UserConstraints = {
+      city,
+      startPoint,
+      durationMinutes,
+      budget,
+      preferences,
+      peopleCount: state.rawInput.peopleCount ?? llmParsed?.data.peopleCount ?? fallbackConstraints.peopleCount,
+      transportMode: state.rawInput.transportMode ?? llmParsed?.data.transportMode ?? fallbackConstraints.transportMode,
+      weatherPreference: state.rawInput.weatherPreference ?? llmParsed?.data.weatherPreference ?? fallbackConstraints.weatherPreference,
+      weatherRisk: state.rawInput.weatherRisk ?? llmParsed?.data.weatherRisk ?? fallbackConstraints.weatherRisk
     };
     const content = llmParsed
       ? `使用 ${llmParsed.model} 解析自然语言约束，并合并表单显式字段。`
@@ -685,7 +717,12 @@ export class CityWalkGraphRunner {
   }
 
   private matchCity(task: string): string | undefined {
-    const knownCities = ["南京", "北京", "上海", "杭州", "苏州", "广州", "深圳", "成都", "西安"];
+    const knownCities = [
+      "南京", "北京", "上海", "杭州", "苏州", "广州", "深圳", "成都", "西安",
+      "武汉", "重庆", "天津", "长沙", "郑州", "青岛", "厦门", "昆明", "大连",
+      "宁波", "无锡", "合肥", "福州", "济南", "沈阳", "哈尔滨", "长春", "太原",
+      "南昌", "南宁", "贵阳", "兰州", "银川", "海口", "拉萨", "乌鲁木齐"
+    ];
     return knownCities.find((city) => task.includes(city));
   }
 

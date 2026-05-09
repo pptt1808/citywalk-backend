@@ -45,7 +45,7 @@ export class MapTool {
 
   async geocode(address: string, city: string): Promise<string | undefined> {
     if (!env.AMAP_KEY) {
-      return this.mockLocationFor(address);
+      return this.mockLocationFor(address, city);
     }
 
     try {
@@ -54,9 +54,9 @@ export class MapTool {
         city
       });
 
-      return data.geocodes?.[0]?.location ?? this.mockLocationFor(address);
+      return data.geocodes?.[0]?.location ?? this.mockLocationFor(address, city);
     } catch {
-      return this.mockLocationFor(address);
+      return this.mockLocationFor(address, city);
     }
   }
 
@@ -71,7 +71,7 @@ export class MapTool {
   ): Promise<Poi[]> {
     const normalizedKeywords = this.normalizeKeywords(keywords);
     if (!env.AMAP_KEY) {
-      return this.filterMockPois(normalizedKeywords, options.indoorOnly);
+      return this.filterMockPois(normalizedKeywords, options.indoorOnly, options.city);
     }
 
     const requests = normalizedKeywords.map((keyword) =>
@@ -88,7 +88,7 @@ export class MapTool {
       .flatMap((item) => (item.status === "fulfilled" ? item.value : []))
       .filter((poi) => !options.indoorOnly || poi.indoor);
 
-    return this.dedupePois(results.length > 0 ? results : this.filterMockPois(normalizedKeywords, options.indoorOnly));
+    return this.dedupePois(results.length > 0 ? results : this.filterMockPois(normalizedKeywords, options.indoorOnly, options.city));
   }
 
   async searchNearbyPoi(
@@ -107,7 +107,7 @@ export class MapTool {
       return this.searchPoi(normalizedKeywords, options);
     }
     if (!env.AMAP_KEY) {
-      return this.filterMockPois(normalizedKeywords, options.indoorOnly);
+      return this.filterMockPois(normalizedKeywords, options.indoorOnly, options.city);
     }
 
     const requests = normalizedKeywords.map((keyword) =>
@@ -124,7 +124,7 @@ export class MapTool {
       .flatMap((item) => (item.status === "fulfilled" ? item.value : []))
       .filter((poi) => !options.indoorOnly || poi.indoor);
 
-    return this.dedupePois(results.length > 0 ? results : this.filterMockPois(normalizedKeywords, options.indoorOnly));
+    return this.dedupePois(results.length > 0 ? results : this.filterMockPois(normalizedKeywords, options.indoorOnly, options.city));
   }
 
   async planRoute(
@@ -316,23 +316,71 @@ export class MapTool {
     throw lastError;
   }
 
-  private filterMockPois(keywords: string[], indoorOnly?: boolean): Poi[] {
-    const candidates: Poi[] = [
-      { name: "先锋书店", category: "bookstore", averageCost: 30, location: "118.769,32.047", rating: 4.8, indoor: true },
-      { name: "北岸咖啡", category: "cafe", averageCost: 28, location: "118.783,32.060", rating: 4.5, indoor: true },
-      { name: "南京市博物馆", category: "museum", averageCost: 0, location: "118.789,32.042", rating: 4.6, indoor: true },
-      { name: "德基广场", category: "mall", averageCost: 45, location: "118.784,32.044", rating: 4.7, indoor: true },
-      { name: "颐和路街区", category: "sight", averageCost: 0, location: "118.764,32.063", rating: 4.4, indoor: false },
-      { name: "玄武湖公园", category: "park", averageCost: 0, location: "118.795,32.070", rating: 4.6, indoor: false },
-      { name: "南京大牌档", category: "restaurant", averageCost: 65, location: "118.784,32.047", rating: 4.3, indoor: true }
-    ];
-
+  private filterMockPois(keywords: string[], indoorOnly?: boolean, city?: string): Poi[] {
+    const candidates = this.cityMockPois(city ?? "南京");
     const matched = candidates.filter((item) => {
       const hit = keywords.some((keyword) => item.name.includes(keyword) || this.keywordMatchesCategory(keyword, item.category));
       return hit && (!indoorOnly || item.indoor);
     });
 
     return matched.length > 0 ? matched : candidates.filter((item) => !indoorOnly || item.indoor);
+  }
+
+  private cityMockPois(city: string): Poi[] {
+    const center = this.cityCenter(city);
+    const [clon, clat] = (center ?? "118.784,32.044").split(",").map(Number);
+
+    const generic: Record<string, Poi[]> = {
+      "南京": [
+        { name: "先锋书店", category: "bookstore", averageCost: 30, rating: 4.8, indoor: true },
+        { name: "北岸咖啡", category: "cafe", averageCost: 28, rating: 4.5, indoor: true },
+        { name: "南京市博物馆", category: "museum", averageCost: 0, rating: 4.6, indoor: true },
+        { name: "德基广场", category: "mall", averageCost: 45, rating: 4.7, indoor: true },
+        { name: "颐和路街区", category: "sight", averageCost: 0, rating: 4.4, indoor: false },
+        { name: "玄武湖公园", category: "park", averageCost: 0, rating: 4.6, indoor: false },
+        { name: "南京大牌档", category: "restaurant", averageCost: 65, rating: 4.3, indoor: true }
+      ],
+      "北京": [
+        { name: "PageOne 书店", category: "bookstore", averageCost: 35, rating: 4.7, indoor: true },
+        { name: "胡同咖啡", category: "cafe", averageCost: 32, rating: 4.4, indoor: true },
+        { name: "中国国家博物馆", category: "museum", averageCost: 0, rating: 4.9, indoor: true },
+        { name: "国贸商城", category: "mall", averageCost: 60, rating: 4.6, indoor: true },
+        { name: "什刹海", category: "sight", averageCost: 0, rating: 4.5, indoor: false },
+        { name: "朝阳公园", category: "park", averageCost: 0, rating: 4.5, indoor: false },
+        { name: "四季民福", category: "restaurant", averageCost: 80, rating: 4.7, indoor: true }
+      ],
+      "上海": [
+        { name: "钟书阁", category: "bookstore", averageCost: 30, rating: 4.6, indoor: true },
+        { name: "Seesaw Coffee", category: "cafe", averageCost: 35, rating: 4.3, indoor: true },
+        { name: "上海博物馆", category: "museum", averageCost: 0, rating: 4.8, indoor: true },
+        { name: "新天地", category: "mall", averageCost: 50, rating: 4.6, indoor: true },
+        { name: "外滩", category: "sight", averageCost: 0, rating: 4.8, indoor: false },
+        { name: "世纪公园", category: "park", averageCost: 0, rating: 4.4, indoor: false },
+        { name: "光明邨", category: "restaurant", averageCost: 70, rating: 4.2, indoor: true }
+      ]
+    };
+
+    const cityPois = generic[city];
+    if (cityPois) {
+      return cityPois.map((poi) => ({
+        ...poi,
+        location: `${clon + (Math.random() - 0.5) * 0.04},${clat + (Math.random() - 0.5) * 0.04}`
+      }));
+    }
+
+    // Generic fallback for unknown cities
+    return [
+      { name: `${city}书店`, category: "bookstore" as const, averageCost: 25, rating: 4.2, indoor: true },
+      { name: `${city}咖啡`, category: "cafe" as const, averageCost: 28, rating: 4.1, indoor: true },
+      { name: `${city}博物馆`, category: "museum" as const, averageCost: 0, rating: 4.5, indoor: true },
+      { name: `${city}购物中心`, category: "mall" as const, averageCost: 40, rating: 4.3, indoor: true },
+      { name: `${city}老街`, category: "sight" as const, averageCost: 0, rating: 4.2, indoor: false },
+      { name: `${city}中心公园`, category: "park" as const, averageCost: 0, rating: 4.4, indoor: false },
+      { name: `${city}本地餐厅`, category: "restaurant" as const, averageCost: 55, rating: 4.0, indoor: true }
+    ].map((poi) => ({
+      ...poi,
+      location: `${clon + (Math.random() - 0.5) * 0.04},${clat + (Math.random() - 0.5) * 0.04}`
+    }));
   }
 
   private normalizeKeywords(keywords: string[] | unknown): string[] {
@@ -411,10 +459,52 @@ export class MapTool {
     return ["bookstore", "cafe", "museum", "mall", "restaurant"].includes(category);
   }
 
-  private mockLocationFor(address: string): string {
+  private mockLocationFor(address: string, city?: string): string {
     if (address.includes("新街口")) return "118.784,32.044";
-    if (address.includes("南京")) return "118.796,32.060";
+    const center = this.cityCenter(city ?? "南京");
+    if (center) return center;
     return "118.784,32.044";
+  }
+
+  private cityCenter(city: string): string | undefined {
+    const centers: Record<string, string> = {
+      "南京": "118.796,32.060",
+      "北京": "116.407,39.904",
+      "上海": "121.473,31.230",
+      "杭州": "120.155,30.274",
+      "苏州": "120.595,31.299",
+      "广州": "113.264,23.129",
+      "深圳": "114.058,22.543",
+      "成都": "104.066,30.573",
+      "西安": "108.940,34.260",
+      "武汉": "114.305,30.593",
+      "重庆": "106.551,29.563",
+      "天津": "117.190,39.125",
+      "长沙": "112.939,28.228",
+      "郑州": "113.625,34.747",
+      "青岛": "120.383,36.067",
+      "厦门": "118.089,24.480",
+      "昆明": "102.833,24.881",
+      "大连": "121.615,38.914",
+      "宁波": "121.544,29.869",
+      "无锡": "120.312,31.491",
+      "合肥": "117.227,31.820",
+      "福州": "119.296,26.074",
+      "济南": "117.001,36.651",
+      "沈阳": "123.464,41.678",
+      "哈尔滨": "126.535,45.802",
+      "长春": "125.324,43.887",
+      "太原": "112.549,37.857",
+      "南昌": "115.858,28.683",
+      "南宁": "108.367,22.817",
+      "贵阳": "106.630,26.647",
+      "兰州": "103.834,36.061",
+      "银川": "106.231,38.487",
+      "海口": "110.199,20.044",
+      "拉萨": "91.172,29.650",
+      "乌鲁木齐": "87.617,43.793"
+    };
+    return centers[city];
   }
 
   private async delay(ms: number): Promise<void> {
