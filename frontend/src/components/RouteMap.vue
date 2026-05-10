@@ -178,9 +178,6 @@ function renderMap() {
 
 async function initMap() {
   if (mapInstance || !mapContainer.value || !hasCoordinates.value) return
-  // Ensure the container is actually visible before creating the map
-  const rect = mapContainer.value.getBoundingClientRect()
-  if (rect.width === 0 || rect.height === 0) return
   try {
     if (!amapScriptPromise) amapScriptPromise = loadAmapScript()
     await amapScriptPromise
@@ -193,7 +190,10 @@ async function initMap() {
       resizeEnable: true
     })
     mapReady.value = true
+    await nextTick()
     renderMap()
+    // Force Amap to recalculate size after render
+    mapInstance?.resize?.()
   } catch {
     loadError.value = true
   }
@@ -237,7 +237,7 @@ watch(() => [props.stops, props.routeLegs, props.startLocation], () => {
     <div v-else-if="loadError" class="map-placeholder">
       <span>地图加载失败，请检查网络或 API Key 配置</span>
     </div>
-    <div ref="mapContainer" class="map-canvas" v-show="hasCoordinates && !loadError"></div>
+    <div v-else ref="mapContainer" class="map-canvas"></div>
   </div>
 </template>
 
