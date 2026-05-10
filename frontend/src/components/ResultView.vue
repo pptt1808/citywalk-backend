@@ -104,6 +104,9 @@ function formatTime(minutes: number): string {
         <!-- Name -->
         <h4 class="stop-name">{{ stop.name }}</h4>
 
+        <!-- Highlight -->
+        <p class="stop-highlight" v-if="stop.highlight">{{ stop.highlight }}</p>
+
         <!-- Address -->
         <p class="stop-address" v-if="stop.address">{{ stop.address }}</p>
 
@@ -121,6 +124,12 @@ function formatTime(minutes: number): string {
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/></svg>
             {{ stop.distanceMeters! >= 1000 ? (stop.distanceMeters! / 1000).toFixed(1) + ' km' : stop.distanceMeters + ' m' }}
           </span>
+        </div>
+
+        <!-- Cost breakdown -->
+        <div class="stop-cost-detail" v-if="stop.costBreakdown">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          <span>{{ stop.costBreakdown }}</span>
         </div>
 
         <!-- Reason -->
@@ -244,7 +253,20 @@ function formatTime(minutes: number): string {
 }
 
 .stop-name { font-size: 15px; font-weight: 700; color: var(--text-h); }
+.stop-highlight {
+  font-size: 12.5px; color: var(--accent); line-height: 1.5;
+  padding: 4px 8px; background: var(--accent-dim);
+  border-radius: 6px; border-left: 3px solid var(--accent);
+}
 .stop-address { font-size: 12px; color: var(--text-muted); }
+.stop-cost-detail {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 7px 10px;
+  background: #fefce8; border: 1px solid #fde68a;
+  border-radius: 7px;
+  font-size: 12px; color: #854d0e; line-height: 1.5;
+}
+.stop-cost-detail svg { flex-shrink: 0; margin-top: 1px; color: #ca8a04; }
 
 .stop-meta-row {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;

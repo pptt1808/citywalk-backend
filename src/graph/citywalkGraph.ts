@@ -397,7 +397,27 @@ export class CityWalkGraphRunner {
     runningSteps: AgentPlanStep[],
     thought: StateEvent
   ): Promise<CityWalkGraphUpdate> {
-    const selectedStops = this.selectStops(state);
+    let selectedStops = this.selectStops(state);
+
+    // 用 LLM 丰富每个点位的费用明细和亮点描述
+    const enriched = await this.llmRouter.enrichPois(
+      selectedStops.map((s) => ({
+        name: s.name,
+        category: s.category,
+        address: s.address,
+        city: state.constraints.city
+      })),
+      state.rawInput.preferredModel
+    );
+    if (enriched?.data && enriched.data.length === selectedStops.length) {
+      selectedStops = selectedStops.map((stop, i) => ({
+        ...stop,
+        estimatedCost: enriched.data[i].estimatedCost,
+        costBreakdown: enriched.data[i].costBreakdown,
+        highlight: enriched.data[i].highlight
+      }));
+    }
+
     const destinations = selectedStops.map((stop) => stop.location).filter((location): location is string => Boolean(location));
     const input = {
       origin: state.startLocation ?? state.constraints.startPoint,

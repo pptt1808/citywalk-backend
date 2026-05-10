@@ -1,5 +1,18 @@
 import { env } from "../config/env";
-import { AgentPlanStep, PlanRequest, UserConstraints } from "../types/plan";
+import { AgentPlanStep, PoiCategory, PlanRequest, RouteStop, UserConstraints } from "../types/plan";
+
+interface PoiEnrichmentInput {
+  name: string;
+  category: PoiCategory;
+  address?: string;
+  city: string;
+}
+
+interface PoiEnrichmentOutput {
+  estimatedCost: number;
+  costBreakdown: string;
+  highlight: string;
+}
 
 type ChatRole = "system" | "user" | "assistant";
 
@@ -83,6 +96,45 @@ export class LlmRouter {
       model: model.model,
       data: this.normalizePlanSteps(data)
     };
+  }
+
+  async enrichPois(
+    pois: PoiEnrichmentInput[],
+    preferredModel?: "flash" | "pro"
+  ): Promise<LlmJsonResult<PoiEnrichmentOutput[]> | undefined> {
+    if (pois.length === 0) return undefined;
+    const task = pois.map((p) => `${p.name}(${p.category})`).join(",");
+    const model = this.selectModel(task, "plan", preferredModel);
+    if (!model.apiKey) return undefined;
+
+    const categoryHints: Record<string, string> = {
+      bookstore: "书店，费用来自购书或文创产品，通常无需门票",
+      cafe: "咖啡馆，费用来自饮品和甜点，人均消费参考当地水平",
+      sight: "景点/街区，部分免费开放，部分收取门票",
+      museum: "博物馆/美术馆，公立多为免费预约，特展可能另收费",
+      mall: "商场/购物中心，无入场费，费用来自购物和餐饮",
+      park: "公园，大多免费，部分景区公园收门票",
+      restaurant: "餐厅，费用来自餐饮消费，按人均估算"
+    };
+
+    const data = await this.completeJson<PoiEnrichmentOutput[]>(model, [
+      {
+        role: "system",
+        content: `你是 CityWalk Pulse 的 POI 信息官。对每个地点，根据你的知识给出：
+- estimatedCost：该地点合理的人均预估消费（数字，单位元）
+- costBreakdown：一句话说明费用来源（如"博物馆免费入场，特展另收30元"、"一杯手冲+甜点约40-55元"）
+- highlight：一句话描述该地点的独特亮点，让人想去
+
+费用参考：${JSON.stringify(categoryHints)}
+输出纯 JSON 数组，顺序与输入一致，不要 Markdown。`
+      },
+      {
+        role: "user",
+        content: JSON.stringify(pois)
+      }
+    ]);
+
+    return { provider: model.provider, model: model.model, data };
   }
 
   private selectModel(task: string, stage: "parse" | "plan", override?: "flash" | "pro"): LlmModelConfig {

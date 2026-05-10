@@ -35,6 +35,10 @@ export interface RouteStop {
   address?: string;
   rating?: number;
   distanceMeters?: number;
+  /** LLM 生成的费用明细，说明每一项开销来源 */
+  costBreakdown?: string;
+  /** LLM 生成的亮点描述，一句话说明该地点特色 */
+  highlight?: string;
 }
 
 export interface RouteLeg {
