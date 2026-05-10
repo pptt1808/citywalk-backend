@@ -22,53 +22,60 @@ const stayMinutes = computed(() =>
   (result.value?.stops ?? []).reduce((s, st) => s + st.estimatedStayMinutes, 0)
 )
 
+// Parse summary into structured sections
+const summaryParts = computed(() => {
+  const s = result.value?.summary ?? ''
+  // Split on Chinese-style delimiters: "。" "；" "。"
+  const sentences = s.split(/[。；;]/).map(p => p.trim()).filter(Boolean)
+  const route = sentences[0] ?? s
+  const rest = sentences.slice(1).join(' · ')
+  return { route, rest }
+})
+
 function formatTime(minutes: number): string {
   const h = Math.floor(minutes / 60)
   const m = minutes % 60
   if (h === 0) return `${m} 分钟`
   return m > 0 ? `${h} 小时 ${m} 分钟` : `${h} 小时`
 }
+
+function formatDist(m: number): string {
+  return m >= 1000 ? (m / 1000).toFixed(1) + ' km' : m + ' m'
+}
+
+const statCards = computed(() => [
+  { icon: '💰', value: `¥${result.value.totalEstimatedCost}`, label: '预估花费' },
+  { icon: '⏱',  value: formatTime(result.value.totalEstimatedMinutes), label: `步行 ${formatTime(routeMinutes.value)}  ·  停留 ${formatTime(stayMinutes.value)}` },
+  { icon: weatherInfo.value.icon, value: weatherInfo.value.text, label: '天气评估', cls: weatherInfo.value.cls },
+  { icon: '📍', value: `${result.value.stops.length} 处`, label: '推荐地点' },
+])
 </script>
 
 <template>
   <div class="result-view" v-if="result">
-    <!-- ── Summary banner ── -->
-    <div class="summary-banner">
-      <div class="banner-icon">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>
-        </svg>
+
+    <!-- ── Hero summary card ── -->
+    <div class="hero-card">
+      <div class="hero-icon-wrap">
+        <div class="hero-icon">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>
+          </svg>
+        </div>
       </div>
-      <div class="banner-body">
-        <p class="banner-label">路线规划完成</p>
-        <p class="banner-summary">{{ result.summary }}</p>
+      <div class="hero-body">
+        <span class="hero-badge">路线规划完成</span>
+        <p class="hero-summary">{{ summaryParts.route }}</p>
+        <p class="hero-detail" v-if="summaryParts.rest">{{ summaryParts.rest }}</p>
       </div>
     </div>
 
-    <!-- ── Stats bar ── -->
-    <div class="stats-bar">
-      <div class="stat-item">
-        <span class="stat-icon">💴</span>
-        <span class="stat-val">¥{{ result.totalEstimatedCost }}</span>
-        <span class="stat-label">预估花费</span>
-      </div>
-      <div class="stat-divider" />
-      <div class="stat-item">
-        <span class="stat-icon">⏱</span>
-        <span class="stat-val">{{ formatTime(result.totalEstimatedMinutes) }}</span>
-        <span class="stat-label">🚶{{ formatTime(routeMinutes) }} + 🛑{{ formatTime(stayMinutes) }}</span>
-      </div>
-      <div class="stat-divider" />
-      <div class="stat-item">
-        <span class="stat-icon">{{ weatherInfo.icon }}</span>
-        <span class="stat-val" :class="weatherInfo.cls">{{ weatherInfo.text }}</span>
-        <span class="stat-label">天气状况</span>
-      </div>
-      <div class="stat-divider" />
-      <div class="stat-item">
-        <span class="stat-icon">📍</span>
-        <span class="stat-val">{{ result.stops.length }} 个</span>
-        <span class="stat-label">推荐地点</span>
+    <!-- ── Stat cards ── -->
+    <div class="stat-grid">
+      <div v-for="(s, i) in statCards" :key="i" class="stat-card">
+        <span class="stat-card-icon">{{ s.icon }}</span>
+        <span class="stat-card-val" :class="s.cls">{{ s.value }}</span>
+        <span class="stat-card-label">{{ s.label }}</span>
       </div>
     </div>
 
@@ -79,78 +86,81 @@ function formatTime(minutes: number): string {
       :startLocation="result.startLocation"
     />
 
-    <!-- ── Route stops ── -->
-    <div class="section-title">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-      </svg>
-      推荐路线
+    <!-- ── Route timeline ── -->
+    <div class="section-header">
+      <span class="section-dot" />
+      <span class="section-title">路线详情</span>
+      <span class="section-count">{{ result.stops.length }} 个地点</span>
     </div>
 
-    <div class="stops-grid">
-      <div v-for="(stop, idx) in result.stops" :key="idx" class="stop-card animate-fade-in" :style="{ animationDelay: (idx * 0.08) + 's' }">
-        <!-- Card header -->
-        <div class="stop-card-header">
-          <div class="stop-seq">{{ idx + 1 }}</div>
-          <div class="stop-cat-badge">
-            <span class="cat-emoji">{{ CAT_ICON[stop.category] }}</span>
-            <span class="cat-text">{{ CAT_LABEL[stop.category] }}</span>
+    <div class="timeline">
+      <div
+        v-for="(stop, idx) in result.stops"
+        :key="idx"
+        class="tl-card animate-fade-in"
+        :style="{ animationDelay: (idx * 0.06) + 's' }"
+      >
+        <!-- Timeline connector -->
+        <div class="tl-rail">
+          <div class="tl-node" :class="`tl-${stop.category}`">{{ idx + 1 }}</div>
+          <div class="tl-line" v-if="idx < result.stops.length - 1" />
+        </div>
+
+        <!-- Card body -->
+        <div class="tl-body">
+          <div class="tl-top">
+            <div class="tl-name-row">
+              <h3 class="tl-name">{{ stop.name }}</h3>
+              <span class="tl-cat" :class="`tl-cat-${stop.category}`">{{ CAT_ICON[stop.category] }} {{ CAT_LABEL[stop.category] }}</span>
+            </div>
+            <div class="tl-cost">¥{{ stop.estimatedCost }}</div>
           </div>
-          <div class="stop-cost-pill">¥{{ stop.estimatedCost }}</div>
+
+          <!-- Highlight -->
+          <div class="tl-highlight" v-if="stop.highlight">{{ stop.highlight }}</div>
+
+          <!-- Address -->
+          <div class="tl-addr" v-if="stop.address">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+            {{ stop.address }}
+          </div>
+
+          <!-- Meta chips -->
+          <div class="tl-meta">
+            <span class="tl-chip" v-if="stop.rating">★ {{ stop.rating.toFixed(1) }}</span>
+            <span class="tl-chip">🕐 {{ stop.estimatedStayMinutes }}分钟</span>
+            <span class="tl-chip" v-if="stop.distanceMeters">📏 {{ formatDist(stop.distanceMeters) }}</span>
+          </div>
+
+          <!-- Info cards -->
+          <div class="tl-info-list">
+            <div class="tl-info tl-info-cost" v-if="stop.costBreakdown">
+              <span class="tl-info-icon">💰</span>
+              <span>{{ stop.costBreakdown }}</span>
+            </div>
+            <div class="tl-info tl-info-book" v-if="stop.bookingInfo" :class="{ 'tl-info-warn': !stop.bookingInfo.includes('免预约') && !stop.bookingInfo.includes('直接') }">
+              <span class="tl-info-icon">📅</span>
+              <span>{{ stop.bookingInfo }}</span>
+            </div>
+          </div>
         </div>
-
-        <!-- Name -->
-        <h4 class="stop-name">{{ stop.name }}</h4>
-
-        <!-- Highlight -->
-        <p class="stop-highlight" v-if="stop.highlight">{{ stop.highlight }}</p>
-
-        <!-- Address -->
-        <p class="stop-address" v-if="stop.address">{{ stop.address }}</p>
-
-        <!-- Rating row -->
-        <div class="stop-meta-row">
-          <span class="stop-rating" v-if="stop.rating">
-            <span v-for="i in 5" :key="i" class="star" :class="{ filled: i <= Math.round(stop.rating!) }">★</span>
-            <span class="rating-num">{{ stop.rating.toFixed(1) }}</span>
-          </span>
-          <span class="meta-chip">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-            {{ stop.estimatedStayMinutes }}分钟
-          </span>
-          <span class="meta-chip" v-if="stop.distanceMeters">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/></svg>
-            {{ stop.distanceMeters! >= 1000 ? (stop.distanceMeters! / 1000).toFixed(1) + ' km' : stop.distanceMeters + ' m' }}
-          </span>
-        </div>
-
-        <!-- Cost breakdown -->
-        <div class="stop-cost-detail" v-if="stop.costBreakdown">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-          <span>{{ stop.costBreakdown }}</span>
-        </div>
-
-        <!-- Booking info -->
-        <div class="stop-booking" v-if="stop.bookingInfo" :class="{ 'booking-required': !stop.bookingInfo.includes('免预约') && !stop.bookingInfo.includes('直接') }">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-          <span>{{ stop.bookingInfo }}</span>
-        </div>
-
-        <!-- Reason -->
-        <p class="stop-reason">{{ stop.reason }}</p>
       </div>
     </div>
 
-    <!-- ── Corrections (if any) ── -->
+    <!-- ── Corrections ── -->
     <div class="corrections-section" v-if="result.corrections?.length">
-      <div class="section-title">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 .49-3.36"/></svg>
-        自动修正记录
+      <div class="section-header">
+        <span class="section-dot warn" />
+        <span class="section-title">自动修正记录</span>
       </div>
-      <ul class="corrections-list">
-        <li v-for="(c, i) in result.corrections" :key="i">{{ c }}</li>
-      </ul>
+      <div class="corrections-card">
+        <div v-for="(c, i) in result.corrections" :key="i" class="corr-item">
+          <span class="corr-num">{{ i + 1 }}</span>
+          <span>{{ c }}</span>
+        </div>
+      </div>
     </div>
+
   </div>
 </template>
 
@@ -158,162 +168,210 @@ function formatTime(minutes: number): string {
 .result-view {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  padding: 20px 24px;
+  gap: 18px;
+  padding: 20px 24px 28px;
   overflow-y: auto;
   flex: 1;
 }
 
-/* Summary banner */
-.summary-banner {
+/* ── Hero card ── */
+.hero-card {
   display: flex;
-  gap: 14px;
-  padding: 18px 20px;
-  background: linear-gradient(135deg, #fff8f5 0%, #fff 100%);
-  border: 1.5px solid var(--accent-border);
-  border-radius: var(--radius);
+  gap: 16px;
+  padding: 20px 22px;
+  background: linear-gradient(135deg, #faf7f2 0%, #fdfcfa 40%, #faf8f6 100%);
+  border: 1.5px solid #e8dfd4;
+  border-radius: 14px;
+  box-shadow: 0 1px 0 rgba(0,0,0,.03);
 }
-.banner-icon {
-  width: 44px; height: 44px; border-radius: 12px;
-  background: var(--accent-dim); border: 1px solid var(--accent-border);
-  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-}
-.banner-body { flex: 1; min-width: 0; }
-.banner-label {
-  font-size: 11px; font-weight: 600; color: var(--accent);
-  text-transform: uppercase; letter-spacing: .07em; margin-bottom: 5px;
-}
-.banner-summary {
-  font-size: 15px; color: var(--text-h); line-height: 1.65; font-weight: 400;
-}
-
-/* Stats bar */
-.stats-bar {
-  display: flex;
-  align-items: center;
-  padding: 14px 20px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-sm);
-}
-.stat-item {
-  flex: 1;
-  display: flex; flex-direction: column;
-  align-items: center; gap: 3px;
-}
-.stat-icon { font-size: 20px; }
-.stat-val { font-size: 17px; font-weight: 700; color: var(--text-h); }
-.stat-label { font-size: 11px; color: var(--text-muted); }
-.stat-divider { width: 1px; height: 40px; background: var(--border); margin: 0 4px; flex-shrink: 0; }
-.wt-low  { color: var(--risk-low); }
-.wt-mid  { color: var(--risk-medium); }
-.wt-high { color: var(--risk-high); }
-
-/* Section title */
-.section-title {
-  display: flex; align-items: center; gap: 7px;
-  font-size: 13px; font-weight: 700; color: var(--text-h);
-  letter-spacing: -.01em;
-}
-
-/* Stop cards grid */
-.stops-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 14px;
-}
-.stop-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-  display: flex; flex-direction: column; gap: 8px;
-  box-shadow: var(--shadow-sm);
-  transition: box-shadow var(--transition), border-color var(--transition);
-}
-.stop-card:hover { box-shadow: var(--shadow); border-color: var(--accent-border); }
-
-.stop-card-header { display: flex; align-items: center; gap: 8px; }
-.stop-seq {
-  width: 22px; height: 22px; border-radius: 50%;
-  background: var(--accent); color: #fff;
+.hero-icon-wrap { flex-shrink: 0; }
+.hero-icon {
+  width: 52px; height: 52px; border-radius: 14px;
+  background: #fff; border: 1px solid #e8dfd4;
   display: flex; align-items: center; justify-content: center;
-  font-size: 11px; font-weight: 700; flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(0,0,0,.04);
 }
-.stop-cat-badge {
-  display: flex; align-items: center; gap: 4px;
-  padding: 2px 8px;
-  background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: 999px; font-size: 12px; color: var(--text-muted);
+.hero-body { flex: 1; min-width: 0; }
+.hero-badge {
+  display: inline-block;
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .1em; color: var(--accent);
+  background: #fff5f0; border: 1px solid var(--accent-border);
+  padding: 3px 10px; border-radius: 999px; margin-bottom: 8px;
 }
-.cat-emoji { font-size: 13px; }
-.cat-text { font-size: 11px; font-weight: 500; }
-.stop-cost-pill {
-  margin-left: auto;
-  padding: 2px 9px;
-  background: #ecfdf5; border: 1px solid #a7f3d0;
-  border-radius: 999px; font-size: 12px; font-weight: 600; color: #065f46;
+.hero-summary {
+  font-size: 18px; font-weight: 700; color: #1e1918;
+  line-height: 1.6; letter-spacing: -.01em;
+}
+.hero-detail {
+  font-size: 13px; color: #6b615c; margin-top: 4px; line-height: 1.55;
 }
 
-.stop-name { font-size: 15px; font-weight: 700; color: var(--text-h); }
-.stop-highlight {
-  font-size: 12.5px; color: var(--accent); line-height: 1.5;
-  padding: 4px 8px; background: var(--accent-dim);
-  border-radius: 6px; border-left: 3px solid var(--accent);
+/* ── Stat grid ── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
 }
-.stop-address { font-size: 12px; color: var(--text-muted); }
-.stop-cost-detail {
-  display: flex; align-items: flex-start; gap: 6px;
-  padding: 7px 10px;
-  background: #fefce8; border: 1px solid #fde68a;
-  border-radius: 7px;
-  font-size: 12px; color: #854d0e; line-height: 1.5;
+@media (max-width: 900px) { .stat-grid { grid-template-columns: repeat(2, 1fr); } }
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 12px;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.03);
+  transition: border-color .2s, box-shadow .2s;
 }
-.stop-cost-detail svg { flex-shrink: 0; margin-top: 1px; color: #ca8a04; }
-.stop-booking {
-  display: flex; align-items: flex-start; gap: 6px;
-  padding: 7px 10px;
-  background: #f0f9ff; border: 1px solid #bae6fd;
-  border-radius: 7px;
-  font-size: 12px; color: #075985; line-height: 1.5;
+.stat-card:hover {
+  border-color: var(--accent-border);
+  box-shadow: 0 2px 12px rgba(0,0,0,.06);
 }
-.stop-booking svg { flex-shrink: 0; margin-top: 1px; }
-.stop-booking.booking-required {
-  background: #fef2f2; border-color: #fecaca; color: #991b1b;
+.stat-card-icon { font-size: 22px; }
+.stat-card-val {
+  font-size: 16px; font-weight: 700; color: var(--text-h);
 }
-.stop-booking.booking-required svg { color: #dc2626; }
+.stat-card-label {
+  font-size: 10.5px; color: var(--text-muted); text-align: center; line-height: 1.4;
+}
+.wt-low  { color: #059669; }
+.wt-mid  { color: #d97706; }
+.wt-high { color: #dc2626; }
 
-.stop-meta-row {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+/* ── Section header ── */
+.section-header {
+  display: flex; align-items: center; gap: 8px;
 }
-.stop-rating { display: flex; align-items: center; gap: 2px; }
-.star { font-size: 12px; color: #d1cfc9; }
-.star.filled { color: #f59e0b; }
-.rating-num { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); margin-left: 2px; }
-.meta-chip {
+.section-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); flex-shrink: 0;
+}
+.section-dot.warn { background: #f59e0b; }
+.section-title {
+  font-size: 14px; font-weight: 700; color: var(--text-h); letter-spacing: -.01em;
+}
+.section-count {
+  margin-left: auto; font-size: 11px; color: var(--text-muted);
+  background: var(--surface-2); padding: 2px 10px; border-radius: 999px;
+}
+
+/* ── Timeline ── */
+.timeline {
+  display: flex; flex-direction: column;
+  padding-left: 4px;
+}
+.tl-card {
+  display: flex; gap: 14px;
+}
+.tl-rail {
+  display: flex; flex-direction: column; align-items: center;
+  width: 28px; flex-shrink: 0; padding-top: 3px;
+}
+.tl-node {
+  width: 28px; height: 28px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: #fff;
+  flex-shrink: 0; z-index: 1;
+  background: var(--accent);
+  box-shadow: 0 2px 6px rgba(212,87,10,.25);
+}
+.tl-bookstore  { background: #6366f1; }
+.tl-cafe       { background: #a855f7; }
+.tl-museum     { background: #0ea5e9; }
+.tl-sight      { background: #f59e0b; }
+.tl-mall       { background: #ec4899; }
+.tl-park       { background: #10b981; }
+.tl-restaurant { background: #ef4444; }
+.tl-line {
+  width: 2px; flex: 1; min-height: 16px;
+  background: linear-gradient(to bottom, var(--accent-border), var(--border));
+  margin: 6px 0;
+}
+.tl-body {
+  flex: 1; min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px; padding: 16px 18px;
+  margin-bottom: 14px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.03);
+  transition: border-color .2s, box-shadow .2s;
+}
+.tl-body:hover { border-color: var(--accent-border); box-shadow: 0 3px 14px rgba(0,0,0,.06); }
+
+.tl-top {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; margin-bottom: 8px;
+}
+.tl-name-row {
+  flex: 1; min-width: 0;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+}
+.tl-name { font-size: 16px; font-weight: 700; color: var(--text-h); }
+.tl-cat {
   display: inline-flex; align-items: center; gap: 3px;
-  padding: 2px 8px;
+  font-size: 11px; color: var(--text-muted);
   background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: 999px; font-size: 11px; color: var(--text-muted);
+  padding: 2px 8px; border-radius: 999px; white-space: nowrap;
 }
-.stop-reason { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+.tl-cost {
+  font-size: 18px; font-weight: 700; color: #065f46;
+  background: #ecfdf5; border: 1px solid #a7f3d0;
+  padding: 4px 12px; border-radius: 8px; white-space: nowrap;
+}
 
-/* Corrections */
-.corrections-section { display: flex; flex-direction: column; gap: 8px; }
-.corrections-list {
-  list-style: none;
-  display: flex; flex-direction: column; gap: 5px;
-  padding: 12px 16px;
+.tl-highlight {
+  font-size: 13px; color: var(--accent); line-height: 1.5;
+  padding: 6px 10px; background: linear-gradient(135deg, #fff8f5, #fff5f0);
+  border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0;
+  margin-bottom: 6px;
+}
+.tl-addr {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--text-muted); margin-bottom: 6px;
+}
+.tl-addr svg { flex-shrink: 0; opacity: .5; }
+
+.tl-meta {
+  display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;
+}
+.tl-chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 3px 9px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 999px; font-size: 11.5px; color: var(--text-muted);
+}
+
+.tl-info-list { display: flex; flex-direction: column; gap: 5px; }
+.tl-info {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 7px 10px; border-radius: 8px;
+  font-size: 12px; line-height: 1.5;
+}
+.tl-info-icon { flex-shrink: 0; font-size: 13px; }
+.tl-info-cost { background: #fefce8; color: #854d0e; }
+.tl-info-book { background: #f0f9ff; color: #075985; }
+.tl-info-warn { background: #fef2f2; color: #991b1b; }
+
+/* ── Corrections ── */
+.corrections-section {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.corrections-card {
   background: #fff9f5; border: 1px solid #fed7aa;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius); padding: 8px 0;
+  display: flex; flex-direction: column;
 }
-.corrections-list li {
-  font-size: 12.5px; color: #7c2d12;
-  padding-left: 14px; position: relative; line-height: 1.55;
+.corr-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 7px 16px; font-size: 12.5px; color: #7c2d12; line-height: 1.5;
 }
-.corrections-list li::before { content: '›'; position: absolute; left: 0; color: var(--accent); font-weight: 700; }
+.corr-num {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #fed7aa; color: #7c2d12;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 1px;
+}
 
 /* Anim */
-.animate-fade-in { animation: fadeSlideIn .28s ease both; }
+.animate-fade-in { animation: fadeSlideIn .3s ease both; }
 </style>
