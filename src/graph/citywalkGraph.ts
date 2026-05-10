@@ -185,8 +185,8 @@ export class CityWalkGraphRunner {
     const matchedCity = this.matchCity(state.task);
     const city = state.rawInput.city
       ?? matchedCity
-      ?? (llmParsed?.data as Record<string, unknown> | undefined)?.city as string | undefined
-      ?? fallbackConstraints.city;
+      ?? fallbackConstraints.city
+      ?? (llmParsed?.data as Record<string, unknown> | undefined)?.city as string | undefined;
 
     const matchedStart = this.matchStartPoint(state.task);
     const startPoint = state.rawInput.startPoint
@@ -775,15 +775,15 @@ export class CityWalkGraphRunner {
 
   private readonly cityAliases: Record<string, string> = {
     "帝都": "北京", "首都": "北京", "京城": "北京",
-    "魔都": "上海", "申城": "上海", "沪": "上海",
-    "金陵": "南京", "宁": "南京",
-    "羊城": "广州", "穗": "广州", "花城": "广州",
-    "鹏城": "深圳", "深": "深圳",
-    "蓉城": "成都", "锦城": "成都", "蓉": "成都",
-    "江城": "武汉", "汉": "武汉",
-    "山城": "重庆", "渝": "重庆",
+    "魔都": "上海", "申城": "上海",
+    "金陵": "南京",
+    "羊城": "广州", "花城": "广州",
+    "鹏城": "深圳",
+    "蓉城": "成都", "锦城": "成都",
+    "江城": "武汉",
+    "山城": "重庆",
     "泉城": "济南", "岛城": "青岛",
-    "鹭岛": "厦门", "鹭江": "厦门",
+    "鹭岛": "厦门",
     "滨城": "大连", "冰城": "哈尔滨",
     "星城": "长沙",
     "古都": "西安", "长安": "西安",
@@ -791,6 +791,11 @@ export class CityWalkGraphRunner {
     "姑苏": "苏州",
     "庐州": "合肥",
     "榕城": "福州",
+  };
+
+  // Single-char aliases matched ONLY as standalone word (not substring)
+  private readonly singleCharAliases: Record<string, string> = {
+    "沪": "上海", "穗": "广州", "渝": "重庆", "蓉": "成都",
   };
 
   private knownCities = [
@@ -801,9 +806,15 @@ export class CityWalkGraphRunner {
   ];
 
   private matchCity(task: string): string | undefined {
-    // Check aliases first
+    // Multi-char aliases (safe for substring matching)
     for (const [alias, city] of Object.entries(this.cityAliases)) {
       if (task.includes(alias)) return city;
+    }
+    // Single-char aliases — only match as standalone word to avoid false hits
+    // e.g. "沪" should match "上海/沪" but NOT in "京沪高速" (handled by multi-char)
+    for (const [alias, city] of Object.entries(this.singleCharAliases)) {
+      const re = new RegExp(`(^|[^\\w])${alias}($|[^\\w])`);
+      if (re.test(task)) return city;
     }
     return this.knownCities.find((city) => task.includes(city));
   }

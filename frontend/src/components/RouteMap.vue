@@ -244,7 +244,9 @@ watch(() => [props.stops, props.routeLegs, props.startLocation], () => {
 <style scoped>
 .route-map-container {
   width: 100%;
+  min-height: 360px;
   height: 360px;
+  flex-shrink: 0;
   border-radius: 10px;
   border: 1px solid var(--border);
   overflow: hidden;
@@ -254,6 +256,7 @@ watch(() => [props.stops, props.routeLegs, props.startLocation], () => {
 .map-canvas {
   width: 100%;
   height: 100%;
+  min-height: 360px;
 }
 .map-placeholder {
   position: absolute;
