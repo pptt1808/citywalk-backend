@@ -23,6 +23,8 @@ export interface RouteStop {
   costBreakdown?: string
   /** LLM 生成的亮点描述，一句话说明该地点特色 */
   highlight?: string
+  /** LLM 生成的预约提醒 */
+  bookingInfo?: string
 }
 
 export interface RouteLeg {
@@ -139,8 +141,102 @@ export async function apiCreateTrace(req: PlanRequest): Promise<{ trace: AgentTr
   return request<{ trace: AgentTrace }>('/api/agent/trace', req)
 }
 
+// ─── History ─────────────────────────────────────────────────────────────────
+
+export interface HistoryEntry {
+  id: string
+  createdAt: string
+  request: PlanRequest
+  result: PlanningResult
+}
+
+export interface HistoryList {
+  entries: HistoryEntry[]
+  total: number
+}
+
+export async function apiListHistory(limit = 20, offset = 0): Promise<HistoryList> {
+  const res = await fetch(`${BASE}/api/history?limit=${limit}&offset=${offset}`)
+  if (!res.ok) throw new Error('Failed to load history')
+  return res.json()
+}
+
+export async function apiGetHistory(id: string): Promise<HistoryEntry> {
+  const res = await fetch(`${BASE}/api/history/${id}`)
+  if (!res.ok) throw new Error('History entry not found')
+  return res.json()
+}
+
+export async function apiDeleteHistory(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/history/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error('Failed to delete history entry')
+}
+
+// ─── Health ───────────────────────────────────────────────────────────────────
+
 export async function apiHealth(): Promise<{ status: string }> {
   const res = await fetch(`${BASE}/api/health`)
   if (!res.ok) throw new Error('health check failed')
   return res.json()
+}
+
+// ─── SSE Streaming ──────────────────────────────────────────────────────────
+
+export interface SseCallbacks {
+  onEvents: (events: StateEvent[]) => void
+  onResult: (result: PlanningResult) => void
+  onError: (message: string) => void
+}
+
+export async function apiCreatePlanStream(req: PlanRequest, cbs: SseCallbacks): Promise<void> {
+  const res = await fetch(`${BASE}/api/agent/trace/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText)
+    throw new Error(`[${res.status}] ${text}`)
+  }
+
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error('No response body')
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+
+      let currentEvent = ''
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          currentEvent = line.slice(7).trim()
+        } else if (line.startsWith('data: ')) {
+          const data = line.slice(6)
+          try {
+            const parsed = JSON.parse(data)
+            if (currentEvent === 'state') {
+              cbs.onEvents(parsed.events ?? [])
+            } else if (currentEvent === 'done') {
+              cbs.onResult(parsed.result)
+            } else if (currentEvent === 'stream_error') {
+              cbs.onError(parsed.message ?? 'Stream error')
+            }
+          } catch {
+            // skip unparseable lines
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
 }

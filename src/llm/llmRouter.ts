@@ -1,5 +1,5 @@
 import { env } from "../config/env";
-import { AgentPlanStep, PoiCategory, PlanRequest, RouteStop, UserConstraints } from "../types/plan";
+import { AgentPlanStep, PoiCategory, PlanRequest, UserConstraints } from "../types/plan";
 
 interface PoiEnrichmentInput {
   name: string;
@@ -12,6 +12,7 @@ interface PoiEnrichmentOutput {
   estimatedCost: number;
   costBreakdown: string;
   highlight: string;
+  bookingInfo: string;
 }
 
 type ChatRole = "system" | "user" | "assistant";
@@ -124,6 +125,7 @@ export class LlmRouter {
 - estimatedCost：该地点合理的人均预估消费（数字，单位元）
 - costBreakdown：一句话说明费用来源（如"博物馆免费入场，特展另收30元"、"一杯手冲+甜点约40-55元"）
 - highlight：一句话描述该地点的独特亮点，让人想去
+- bookingInfo：是否需要提前预约（如"需提前3天在公众号预约"、"需在XX小程序预约，现场刷身份证入场"、"免预约，直接前往即可"、"周末建议提前1天电话预约"）
 
 费用参考：${JSON.stringify(categoryHints)}
 输出纯 JSON 数组，顺序与输入一致，不要 Markdown。`

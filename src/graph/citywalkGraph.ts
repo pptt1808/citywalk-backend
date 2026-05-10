@@ -414,7 +414,8 @@ export class CityWalkGraphRunner {
         ...stop,
         estimatedCost: enriched.data[i].estimatedCost,
         costBreakdown: enriched.data[i].costBreakdown,
-        highlight: enriched.data[i].highlight
+        highlight: enriched.data[i].highlight,
+        bookingInfo: enriched.data[i].bookingInfo
       }));
     }
 
@@ -771,14 +772,39 @@ export class CityWalkGraphRunner {
     return minutes[category];
   }
 
+  private readonly cityAliases: Record<string, string> = {
+    "帝都": "北京", "首都": "北京", "京城": "北京",
+    "魔都": "上海", "申城": "上海", "沪": "上海",
+    "金陵": "南京", "宁": "南京",
+    "羊城": "广州", "穗": "广州", "花城": "广州",
+    "鹏城": "深圳", "深": "深圳",
+    "蓉城": "成都", "锦城": "成都", "蓉": "成都",
+    "江城": "武汉", "汉": "武汉",
+    "山城": "重庆", "渝": "重庆",
+    "泉城": "济南", "岛城": "青岛",
+    "鹭岛": "厦门", "鹭江": "厦门",
+    "滨城": "大连", "冰城": "哈尔滨",
+    "星城": "长沙",
+    "古都": "西安", "长安": "西安",
+    "杭城": "杭州",
+    "姑苏": "苏州",
+    "庐州": "合肥",
+    "榕城": "福州",
+  };
+
+  private knownCities = [
+    "南京", "北京", "上海", "杭州", "苏州", "广州", "深圳", "成都", "西安",
+    "武汉", "重庆", "天津", "长沙", "郑州", "青岛", "厦门", "昆明", "大连",
+    "宁波", "无锡", "合肥", "福州", "济南", "沈阳", "哈尔滨", "长春", "太原",
+    "南昌", "南宁", "贵阳", "兰州", "银川", "海口", "拉萨", "乌鲁木齐"
+  ];
+
   private matchCity(task: string): string | undefined {
-    const knownCities = [
-      "南京", "北京", "上海", "杭州", "苏州", "广州", "深圳", "成都", "西安",
-      "武汉", "重庆", "天津", "长沙", "郑州", "青岛", "厦门", "昆明", "大连",
-      "宁波", "无锡", "合肥", "福州", "济南", "沈阳", "哈尔滨", "长春", "太原",
-      "南昌", "南宁", "贵阳", "兰州", "银川", "海口", "拉萨", "乌鲁木齐"
-    ];
-    return knownCities.find((city) => task.includes(city));
+    // Check aliases first
+    for (const [alias, city] of Object.entries(this.cityAliases)) {
+      if (task.includes(alias)) return city;
+    }
+    return this.knownCities.find((city) => task.includes(city));
   }
 
   private matchStartPoint(task: string): string | undefined {

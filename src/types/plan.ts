@@ -39,6 +39,8 @@ export interface RouteStop {
   costBreakdown?: string;
   /** LLM 生成的亮点描述，一句话说明该地点特色 */
   highlight?: string;
+  /** LLM 生成的预约提醒，如"需提前3天在公众号预约"、"免预约直接进入" */
+  bookingInfo?: string;
 }
 
 export interface RouteLeg {

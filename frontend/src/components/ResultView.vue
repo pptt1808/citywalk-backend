@@ -1,20 +1,11 @@
 <script setup lang="ts">
 import { inject, computed } from 'vue'
 import type { useAgentPlan } from '../composables/useAgentPlan'
-import type { PoiCategory } from '../api/agent'
+import { CAT_ICON, CAT_LABEL } from '../constants'
 import RouteMap from './RouteMap.vue'
 
 const agent = inject<ReturnType<typeof useAgentPlan>>('agent')!
 const result = computed(() => agent.result.value!)
-
-const catIcon: Record<PoiCategory, string> = {
-  bookstore: '📚', cafe: '☕', sight: '🏛', museum: '🎨',
-  mall: '🛍', park: '🌳', restaurant: '🍜',
-}
-const catLabel: Record<PoiCategory, string> = {
-  bookstore: '书店', cafe: '咖啡', sight: '景点', museum: '博物馆',
-  mall: '商场', park: '公园', restaurant: '餐厅',
-}
 
 const weatherInfo = computed(() => {
   const r = result.value?.weatherRisk
@@ -95,8 +86,8 @@ function formatTime(minutes: number): string {
         <div class="stop-card-header">
           <div class="stop-seq">{{ idx + 1 }}</div>
           <div class="stop-cat-badge">
-            <span class="cat-emoji">{{ catIcon[stop.category] }}</span>
-            <span class="cat-text">{{ catLabel[stop.category] }}</span>
+            <span class="cat-emoji">{{ CAT_ICON[stop.category] }}</span>
+            <span class="cat-text">{{ CAT_LABEL[stop.category] }}</span>
           </div>
           <div class="stop-cost-pill">¥{{ stop.estimatedCost }}</div>
         </div>
@@ -130,6 +121,12 @@ function formatTime(minutes: number): string {
         <div class="stop-cost-detail" v-if="stop.costBreakdown">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           <span>{{ stop.costBreakdown }}</span>
+        </div>
+
+        <!-- Booking info -->
+        <div class="stop-booking" v-if="stop.bookingInfo" :class="{ 'booking-required': !stop.bookingInfo.includes('免预约') && !stop.bookingInfo.includes('直接') }">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          <span>{{ stop.bookingInfo }}</span>
         </div>
 
         <!-- Reason -->
@@ -267,6 +264,18 @@ function formatTime(minutes: number): string {
   font-size: 12px; color: #854d0e; line-height: 1.5;
 }
 .stop-cost-detail svg { flex-shrink: 0; margin-top: 1px; color: #ca8a04; }
+.stop-booking {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 7px 10px;
+  background: #f0f9ff; border: 1px solid #bae6fd;
+  border-radius: 7px;
+  font-size: 12px; color: #075985; line-height: 1.5;
+}
+.stop-booking svg { flex-shrink: 0; margin-top: 1px; }
+.stop-booking.booking-required {
+  background: #fef2f2; border-color: #fecaca; color: #991b1b;
+}
+.stop-booking.booking-required svg { color: #dc2626; }
 
 .stop-meta-row {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;

@@ -1,13 +1,16 @@
 import { UrbanPulseAgent } from "../agents/urbanPulseAgent";
 import { MapTool } from "../tools/mapTool";
 import { WeatherTool } from "../tools/weatherTool";
+import { historyStore } from "./historyStore";
 import { AgentTrace, PlanningResult, PlanRequest, StateEvent } from "../types/plan";
 
 class PlannerService {
   private readonly agent = new UrbanPulseAgent(new MapTool(), new WeatherTool());
 
   async createPlan(input: PlanRequest): Promise<PlanningResult> {
-    return this.agent.plan(input);
+    const result = await this.agent.plan(input);
+    historyStore.save(input, result);
+    return result;
   }
 
   async createTrace(input: PlanRequest): Promise<{ trace: AgentTrace }> {
@@ -19,7 +22,9 @@ class PlannerService {
   }
 
   async streamPlanWithStateEvents(input: PlanRequest, onDelta: (events: StateEvent[]) => void): Promise<PlanningResult> {
-    return this.agent.planWithStateEventStream(input, onDelta);
+    const result = await this.agent.planWithStateEventStream(input, onDelta);
+    historyStore.save(input, result);
+    return result;
   }
 }
 

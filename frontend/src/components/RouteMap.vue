@@ -41,6 +41,12 @@ function loadAmapScript(): Promise<void> {
     return Promise.reject(new Error('Missing AMap key'))
   }
   if ((window as any).AMap) return Promise.resolve()
+
+  const security = (import.meta as any).env?.VITE_AMAP_SECURITY
+  if (security) {
+    (window as any)._AMapSecurityConfig = { securityJsCode: security }
+  }
+
   return new Promise((resolve, reject) => {
     const script = document.createElement('script')
     script.src = `https://webapi.amap.com/maps?v=2.0&key=${key}`
@@ -115,8 +121,9 @@ function renderMap() {
     })
     marker.on('click', () => {
       const cost = stop.estimatedCost > 0 ? `约${stop.estimatedCost}元` : '免费'
+      const extra = [stop.highlight, stop.costBreakdown, stop.bookingInfo].filter(Boolean).map(s => `<span style="color:#9b9590;font-size:11px">${s}</span>`).join('<br/>')
       const info = createInfoWindow({
-        content: `<div style="font-size:13px;line-height:1.6;padding:4px 2px"><strong>${stop.name}</strong><br/><span style="color:#9b9590">${stop.address ?? ''}</span><br/><span>${cost} · ${stop.estimatedStayMinutes}分钟</span></div>`,
+        content: `<div style="font-size:13px;line-height:1.6;padding:4px 2px;max-width:220px"><strong>${stop.name}</strong><br/><span style="color:#9b9590">${stop.address ?? ''}</span><br/><span>${cost} · ${stop.estimatedStayMinutes}分钟</span>${extra ? '<br/>' + extra : ''}</div>`,
         offset: createPixel(0, -36)
       })
       info.open(mapInstance!, marker.getPosition())
@@ -139,6 +146,28 @@ function renderMap() {
       zIndex: 50
     })
     polyline.setMap(mapInstance)
+  }
+
+  // Route leg mid-point labels
+  if (coords.length >= 2 && props.routeLegs?.length) {
+    const modeLabel: Record<string, string> = { walk: '🚶', transit: '🚇', bicycling: '🚲' }
+    for (let i = 0; i < props.routeLegs.length && i < coords.length - 1; i++) {
+      const leg = props.routeLegs[i]
+      const a = coords[i]
+      const b = coords[i + 1]
+      const mid: [number, number] = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]
+      const dist = leg.distanceMeters >= 1000
+        ? (leg.distanceMeters / 1000).toFixed(1) + 'km'
+        : leg.distanceMeters + 'm'
+      const labelMarker = createMarker({
+        position: mid,
+        content: `<div style="background:rgba(0,0,0,.55);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;white-space:nowrap">${modeLabel[leg.mode] ?? '📍'} ${dist} ${leg.durationMinutes}min</div>`,
+        offset: createPixel(-30, -10),
+        zIndex: 60
+      })
+      labelMarker.setMap(mapInstance)
+      markers.push(labelMarker)
+    }
   }
 
   // Fit view

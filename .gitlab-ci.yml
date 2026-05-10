@@ -37,7 +37,7 @@ build-frontend:
     - npm install
     - chmod +x ./node_modules/.bin/vue-tsc ./node_modules/.bin/vite
     - ./node_modules/.bin/vue-tsc --noEmit
-    - VITE_AMAP_KEY=${VITE_AMAP_KEY:-} ./node_modules/.bin/vite build
+    - VITE_AMAP_KEY=${VITE_AMAP_KEY:-} VITE_AMAP_SECURITY=${VITE_AMAP_SECURITY:-} ./node_modules/.bin/vite build
   cache:
     key: agent-frontend-node
     paths:

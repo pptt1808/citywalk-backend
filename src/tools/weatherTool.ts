@@ -1,4 +1,7 @@
 import { env } from "../config/env";
+import { cache } from "../utils/cache";
+
+const WEATHER_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 export interface WeatherContext {
   rainProbability: number;
@@ -36,6 +39,10 @@ export class WeatherTool {
   }
 
   async getWeatherContext(city: string): Promise<WeatherContext> {
+    const cacheKey = `weather:${city}`;
+    const cached = cache.get<WeatherContext>(cacheKey);
+    if (cached) return cached;
+
     if (!env.QWEATHER_KEY) {
       return this.mockWeatherContext(city);
     }
@@ -68,7 +75,7 @@ export class WeatherTool {
       const activeWarning = warning.warning?.[0];
       const risk = this.inferRisk(rainProbability, activeWarning?.level, airQuality?.aqi);
 
-      return {
+      const result: WeatherContext = {
         rainProbability,
         risk,
         summary: `${city} 未来数小时${rainProbability >= 60 ? "降雨风险较高" : rainProbability >= 30 ? "可能有降雨" : "适合户外漫步"}`,
@@ -87,6 +94,8 @@ export class WeatherTool {
         })),
         airQuality
       };
+      cache.set(cacheKey, result, WEATHER_CACHE_TTL);
+      return result;
     } catch {
       return this.mockWeatherContext(city);
     }

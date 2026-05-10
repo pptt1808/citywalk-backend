@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 import {
-  apiCreatePlan,
+  apiCreatePlanStream,
   apiHealth,
   type PlanRequest,
   type PlanningResult,
@@ -9,11 +9,6 @@ import {
 } from '../api/agent'
 
 export type RunStatus = 'idle' | 'loading' | 'streaming' | 'done' | 'error'
-
-// Delay between each event card animation (ms) — longer = more visible
-const EVENT_REVEAL_DELAY = 360
-// Extra pause after last event before switching to result view
-const POST_STREAM_PAUSE = 900
 
 export function useAgentPlan() {
   const status = ref<RunStatus>('idle')
@@ -48,23 +43,22 @@ export function useAgentPlan() {
     rawJson.value = ''
 
     try {
-      const data = await apiCreatePlan(req)
-      result.value = data
-      rawJson.value = JSON.stringify(data, null, 2)
-
-      // Immediately show plan steps (they're already status=done from backend)
-      visibleSteps.value = data.planSteps ?? []
-
-      // Progressively reveal events — one by one so the user can read each step
-      const events = data.events ?? []
-      status.value = 'streaming'
-      for (const ev of events) {
-        await new Promise<void>(r => setTimeout(r, EVENT_REVEAL_DELAY))
-        visibleEvents.value.push(ev)
-      }
-      // Linger on the last event so the user sees it before the result view appears
-      await new Promise<void>(r => setTimeout(r, POST_STREAM_PAUSE))
-      status.value = 'done'
+      await apiCreatePlanStream(req, {
+        onEvents(events) {
+          if (status.value === 'loading') status.value = 'streaming'
+          visibleEvents.value.push(...events)
+        },
+        onResult(data) {
+          result.value = data
+          rawJson.value = JSON.stringify(data, null, 2)
+          visibleSteps.value = data.planSteps ?? []
+          status.value = 'done'
+        },
+        onError(msg) {
+          error.value = msg
+          status.value = 'error'
+        }
+      })
     } catch (e) {
       error.value = (e as Error).message
       status.value = 'error'

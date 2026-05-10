@@ -3,6 +3,9 @@ import { inject } from 'vue'
 import type { Ref } from 'vue'
 import type { useAgentPlan } from '../composables/useAgentPlan'
 
+defineProps<{ showHistory?: boolean }>()
+const emit = defineEmits<{ 'toggleHistory': [] }>()
+
 const agent = inject<ReturnType<typeof useAgentPlan>>('agent')!
 const showDebugJson = inject<Ref<boolean>>('showDebugJson')!
 </script>
@@ -55,6 +58,12 @@ const showDebugJson = inject<Ref<boolean>>('showDebugJson')!
         />
         <span>{{ agent.backendOnline.value === null ? '检查中' : agent.backendOnline.value ? 'API 在线' : 'API 离线' }}</span>
       </div>
+
+      <!-- History toggle -->
+      <button class="icon-btn" :class="{ active: showHistory }" @click="emit('toggleHistory')" title="历史记录">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        历史
+      </button>
 
       <!-- JSON debug toggle -->
       <button class="icon-btn" :class="{ active: showDebugJson }" @click="showDebugJson = !showDebugJson" title="JSON 调试">

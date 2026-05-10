@@ -1,29 +1,9 @@
 <script setup lang="ts">
 import { inject, computed } from 'vue'
 import type { useAgentPlan } from '../composables/useAgentPlan'
-import type { PoiCategory } from '../api/agent'
+import { CAT_ICON, CAT_LABEL } from '../constants'
 
 const agent = inject<ReturnType<typeof useAgentPlan>>('agent')!
-
-const categoryIcons: Record<PoiCategory, string> = {
-  bookstore: '📚',
-  cafe: '☕',
-  sight: '🏛',
-  museum: '🎨',
-  mall: '🛍',
-  park: '🌳',
-  restaurant: '🍜',
-}
-
-const categoryLabels: Record<PoiCategory, string> = {
-  bookstore: '书店',
-  cafe: '咖啡',
-  sight: '景点',
-  museum: '博物馆',
-  mall: '商场',
-  park: '公园',
-  restaurant: '餐厅',
-}
 
 const weatherRiskLabel = computed(() => {
   const r = agent.result.value?.weatherRisk
@@ -125,13 +105,16 @@ const timePercent = computed(() => {
           >
             <div class="stop-header">
               <div class="stop-index">{{ idx + 1 }}</div>
-              <span class="stop-cat-icon">{{ categoryIcons[stop.category] }}</span>
+              <span class="stop-cat-icon">{{ CAT_ICON[stop.category] }}</span>
               <div class="stop-info">
                 <div class="stop-name">{{ stop.name }}</div>
-                <div class="stop-cat-label">{{ categoryLabels[stop.category] }}</div>
+                <div class="stop-cat-label">{{ CAT_LABEL[stop.category] }}</div>
               </div>
               <div class="stop-cost">¥{{ stop.estimatedCost }}</div>
             </div>
+
+            <!-- Highlight -->
+            <div class="cp-highlight" v-if="stop.highlight">{{ stop.highlight }}</div>
 
             <!-- Rating -->
             <div v-if="stop.rating" class="stop-rating">
@@ -156,6 +139,12 @@ const timePercent = computed(() => {
                 {{ stop.distanceMeters >= 1000 ? (stop.distanceMeters / 1000).toFixed(1) + 'km' : stop.distanceMeters + 'm' }}
               </span>
             </div>
+
+            <!-- Cost breakdown -->
+            <div class="cp-cost" v-if="stop.costBreakdown">💰 {{ stop.costBreakdown }}</div>
+
+            <!-- Booking -->
+            <div class="cp-booking" v-if="stop.bookingInfo">📅 {{ stop.bookingInfo }}</div>
 
             <div class="stop-reason">{{ stop.reason }}</div>
           </div>
@@ -333,6 +322,19 @@ const timePercent = computed(() => {
   border-radius: 999px;
   font-size: 11px;
   color: var(--text-muted);
+}
+.cp-highlight {
+  font-size: 11px; color: var(--accent); line-height: 1.4;
+  margin: 2px 0 0 28px; padding: 3px 6px;
+  background: var(--accent-dim); border-radius: 4px;
+}
+.cp-cost {
+  font-size: 11px; color: #854d0e; line-height: 1.4;
+  margin: 3px 0 0 28px;
+}
+.cp-booking {
+  font-size: 11px; color: #075985; line-height: 1.4;
+  margin: 2px 0 0 28px;
 }
 .stop-reason {
   font-size: 11px;
