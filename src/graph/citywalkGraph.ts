@@ -26,7 +26,7 @@ const CityWalkState = Annotation.Root({
   routeLegs: Annotation<RouteLeg[]>(),
   totalEstimatedCost: Annotation<number>(),
   totalEstimatedMinutes: Annotation<number>(),
-  weatherRisk: Annotation<"low" | "medium" | "high">(),
+  weatherRisk: Annotation<"low" | "medium" | "high" | undefined>(),
   needsReplan: Annotation<boolean>(),
   revisionCount: Annotation<number>(),
   finalAnswer: Annotation<string>(),
@@ -111,7 +111,7 @@ export class CityWalkGraphRunner {
       routeLegs: [],
       totalEstimatedCost: 0,
       totalEstimatedMinutes: 0,
-      weatherRisk: input.weatherRisk ?? "medium",
+      weatherRisk: input.weatherRisk,
       needsReplan: false,
       revisionCount: 0,
       finalAnswer: "",
@@ -465,7 +465,15 @@ export class CityWalkGraphRunner {
       input: { origin, destinations, mode: state.constraints.transportMode ?? "mixed", city: state.constraints.city }
     });
 
-    const routeLegs = await this.mapTool.planRoute(origin, destinations, state.constraints.transportMode ?? "mixed", state.constraints.city);
+    let routeLegs = await this.mapTool.planRoute(origin, destinations, state.constraints.transportMode ?? "mixed", state.constraints.city);
+
+    // Enforce maxLegMinutes: if any walk leg exceeds limit, replan with transit
+    if (state.constraints.maxLegMinutes) {
+      const tooLong = routeLegs.some((leg) => leg.durationMinutes > state.constraints.maxLegMinutes!);
+      if (tooLong) {
+        routeLegs = await this.mapTool.planRoute(origin, destinations, "transit", state.constraints.city);
+      }
+    }
 
     const routeMinutes = routeLegs.reduce((sum, leg) => sum + leg.durationMinutes, 0);
     const stayMinutes = selectedStops.reduce((sum, stop) => sum + stop.estimatedStayMinutes, 0);
@@ -507,7 +515,8 @@ export class CityWalkGraphRunner {
     thought: StateEvent
   ): Promise<CityWalkGraphUpdate> {
     const violations = this.detectViolations(state);
-    const obs = this.event("OBS", violations.length > 0 ? `发现约束问题：${violations.join("；")}` : "预算、时间与天气约束通过。", state, step.id, {
+    const checkLabel = state.constraints.budget != null ? "预算、时间与天气约束通过" : "时间与天气约束通过";
+    const obs = this.event("OBS", violations.length > 0 ? `发现约束问题：${violations.join("；")}` : `${checkLabel}。`, state, step.id, {
       tool: "constraint_check",
       input: {
         budget: state.constraints.budget,
@@ -544,15 +553,25 @@ export class CityWalkGraphRunner {
 
     const correction = this.chooseCorrection(state, violations);
     const reflectedStops = this.applyCorrection(state, correction);
+
+    // Re-plan routes with corrected stops
+    const origin = state.startLocation ?? state.constraints.startPoint;
+    const destinations = reflectedStops.map((stop) => stop.location).filter((l): l is string => Boolean(l));
+    let newLegs = await this.mapTool.planRoute(origin, destinations, state.constraints.transportMode ?? "mixed", state.constraints.city);
+    if (state.constraints.maxLegMinutes && newLegs.some((l) => l.durationMinutes > state.constraints.maxLegMinutes!)) {
+      newLegs = await this.mapTool.planRoute(origin, destinations, "transit", state.constraints.city);
+    }
+
+    const routeMins = newLegs.reduce((s, l) => s + l.durationMinutes, 0);
+    const stayMins = reflectedStops.reduce((s, st) => s + st.estimatedStayMinutes, 0);
+
     const event = this.event("REFLECT", correction, state);
 
     return {
       selectedStops: reflectedStops,
+      routeLegs: newLegs,
       totalEstimatedCost: reflectedStops.reduce((sum, stop) => sum + stop.estimatedCost, 0),
-      totalEstimatedMinutes: Math.min(
-        state.constraints.durationMinutes,
-        reflectedStops.reduce((sum, stop) => sum + stop.estimatedStayMinutes, 0) + state.routeLegs.reduce((sum, leg) => sum + leg.durationMinutes, 0)
-      ),
+      totalEstimatedMinutes: stayMins + routeMins,
       needsReplan: false,
       revisionCount: state.revisionCount + 1,
       events: [event],
@@ -601,7 +620,7 @@ export class CityWalkGraphRunner {
     const task = input.task ?? "";
     const city = input.city ?? this.matchCity(task) ?? "南京";
     const startPoint = input.startPoint ?? this.matchStartPoint(task) ?? "新街口";
-    const durationMinutes = input.durationMinutes ?? this.matchDuration(task) ?? 180;
+    const durationMinutes = input.durationMinutes ?? this.matchDuration(task) ?? undefined;
     const budget = input.budget ?? this.matchBudget(task) ?? undefined;
     const preferences = input.preferences?.length ? input.preferences : this.matchPreferences(task);
     const weatherPreference = input.weatherPreference ?? (/室内|避雨|下雨|雨天/.test(task) ? "indoor_first" : "outdoor_ok");
@@ -642,12 +661,12 @@ export class CityWalkGraphRunner {
     return {
       city: input.city ?? "南京",
       startPoint: input.startPoint ?? "新街口",
-      durationMinutes: input.durationMinutes ?? 180,
-      budget: undefined, // no budget limit unless user specifies
+      durationMinutes: input.durationMinutes ?? undefined,
+      budget: undefined,
       preferences: input.preferences ?? [],
       peopleCount: input.peopleCount ?? 1,
       transportMode: input.transportMode ?? "mixed",
-      weatherPreference: input.weatherPreference ?? "outdoor_ok",
+      weatherPreference: input.weatherPreference ?? undefined,
       weatherRisk: input.weatherRisk
     };
   }
@@ -661,25 +680,20 @@ export class CityWalkGraphRunner {
     const stops: RouteStop[] = [];
     let cost = 0;
     let minutes = 0;
-    const routeBuffer = Math.max(30, Math.round(state.constraints.durationMinutes * 0.25));
-
-    // If user specified an endPoint, ensure it's the last stop
-    if (state.constraints.endPoint) {
-      const epPoi = sorted.find(p => p.name === state.constraints.endPoint);
-      if (epPoi) {
-        // Remove from sorted so it's not picked in the middle
-        const epIndex = sorted.indexOf(epPoi);
-        sorted.splice(epIndex, 1);
-      }
-    }
+    const hasTimeLimit = state.constraints.durationMinutes != null;
+    const timeCap = state.constraints.durationMinutes ?? 240;
+    const routeBuffer = Math.max(30, Math.round(timeCap * 0.25));
 
     for (const poi of sorted) {
+      // Skip user-specified endpoint — added separately at the end
+      if (state.constraints.endPoint && poi.name === state.constraints.endPoint) continue;
+
       const stay = this.estimateStayMinutes(poi.category);
       // Budget check only if user specified a budget
       if (state.constraints.budget != null && cost + poi.averageCost > state.constraints.budget) {
         continue;
       }
-      if (minutes + stay + routeBuffer > state.constraints.durationMinutes) {
+      if (hasTimeLimit && minutes + stay + routeBuffer > state.constraints.durationMinutes!) {
         continue;
       }
       stops.push({
@@ -730,7 +744,7 @@ export class CityWalkGraphRunner {
     if (state.constraints.budget != null && state.totalEstimatedCost > state.constraints.budget) {
       violations.push(`预算超支 ${state.totalEstimatedCost - state.constraints.budget} 元`);
     }
-    if (state.totalEstimatedMinutes > state.constraints.durationMinutes) {
+    if (state.constraints.durationMinutes != null && state.totalEstimatedMinutes > state.constraints.durationMinutes) {
       violations.push(`路线超时 ${state.totalEstimatedMinutes - state.constraints.durationMinutes} 分钟`);
     }
     if (state.selectedStops.length === 0) {
@@ -754,8 +768,11 @@ export class CityWalkGraphRunner {
 
   private applyCorrection(state: CityWalkGraphState, correction: string): RouteStop[] {
     let stops = [...state.selectedStops];
+    const isEndpoint = (s: RouteStop) => state.constraints.endPoint && s.name === state.constraints.endPoint;
+
     if (correction.includes("天气")) {
-      stops = stops.filter((stop) => !["park", "sight"].includes(stop.category));
+      // Don't remove the user-specified endpoint
+      stops = stops.filter((stop) => isEndpoint(stop) || !["park", "sight"].includes(stop.category));
       const indoorCandidates = state.candidatePois.filter((poi) => poi.indoor && !stops.some((stop) => stop.name === poi.name));
       for (const poi of indoorCandidates) {
         if (stops.length >= 3) break;
@@ -772,29 +789,36 @@ export class CityWalkGraphRunner {
       }
     }
     if (correction.includes("预算") && state.constraints.budget != null) {
-      stops = stops.sort((left, right) => left.estimatedCost - right.estimatedCost);
-      while (stops.reduce((sum, stop) => sum + stop.estimatedCost, 0) > state.constraints.budget) {
-        stops.pop();
+      const endpointStop = stops.find(isEndpoint);
+      const normalStops = stops.filter(s => !isEndpoint(s)).sort((a, b) => a.estimatedCost - b.estimatedCost);
+      let costSum = normalStops.reduce((s, st) => s + st.estimatedCost, 0) + (endpointStop?.estimatedCost ?? 0);
+      while (costSum > state.constraints.budget && normalStops.length > 0) {
+        const removed = normalStops.pop()!;
+        costSum -= removed.estimatedCost;
       }
+      stops = [...normalStops];
+      if (endpointStop) stops.push(endpointStop);
     }
     if (correction.includes("时间")) {
-      stops = stops
-        .map((stop) => ({
-          stop,
-          density: (stop.rating ?? 4) / Math.max(1, stop.estimatedStayMinutes)
-        }))
-        .sort((left, right) => right.density - left.density)
-        .map((item) => item.stop);
-      while (stops.reduce((sum, stop) => sum + stop.estimatedStayMinutes, 0) > state.constraints.durationMinutes * 0.75) {
-        stops.pop();
+      // Separate endpoint from normal stops
+      const endpointStop = stops.find(isEndpoint);
+      const normalStops = stops.filter(s => !isEndpoint(s));
+      normalStops.sort((a, b) => ((b.rating ?? 4) / Math.max(1, b.estimatedStayMinutes)) - ((a.rating ?? 4) / Math.max(1, a.estimatedStayMinutes)));
+      let timeSum = normalStops.reduce((s, st) => s + st.estimatedStayMinutes, 0) + (endpointStop?.estimatedStayMinutes ?? 0);
+      const cap = state.constraints.durationMinutes ?? 240;
+      while (timeSum > cap * 0.75 && normalStops.length > 0) {
+        const removed = normalStops.pop()!;
+        timeSum -= removed.estimatedStayMinutes;
       }
+      stops = [...normalStops];
+      if (endpointStop) stops.push(endpointStop);
     }
     return stops;
   }
 
   private buildFinalAnswer(state: CityWalkGraphState): string {
     if (state.selectedStops.length === 0) {
-      return `从${state.constraints.startPoint}出发暂未找到满足 ${state.constraints.durationMinutes} 分钟的路线，建议放宽时间或扩展偏好关键词。`;
+      return `从${state.constraints.startPoint}出发暂未找到合适的路线，建议放宽约束或扩展偏好关键词。`;
     }
 
     const stops = state.selectedStops;
@@ -941,8 +965,18 @@ export class CityWalkGraphRunner {
   }
 
   private matchEndPoint(task: string): string | undefined {
-    // "最后一个地点是XX", "终点是XX", "最后到XX", "终点站XX", "结束于XX"
-    return task.match(/(?:最后一个地点|终点|最后到|终点站|结束于)(?:是|在|为)?\s*(.{2,15}?)(?:[。，,\s]|$)/)?.[1]?.trim();
+    // "最后一个地点是XX", "终点XX", "最后到/到达XX", "终点站XX", "以XX为终点", "终点设为XX"
+    const patterns = [
+      /(?:最后一个地点|终点站|结束于)(?:是|在|为|设为)?\s*(.{2,15}?)(?:[。，,\s]|$)/,
+      /最后(?:到|到达)\s*(.{2,15}?)(?:[。，,\s]|$)/,
+      /以(.{2,15}?)为终点/,
+      /终点(?:是|为|设在?)?\s*(.{2,15}?)(?:[。，,\s]|$)/,
+    ];
+    for (const re of patterns) {
+      const m = task.match(re);
+      if (m) return m[1].trim();
+    }
+    return undefined;
   }
 
   private matchMaxLegMinutes(task: string): number | undefined {
@@ -962,6 +996,7 @@ export class CityWalkGraphRunner {
 
   private describeStructuredInput(input: PlanRequest): string {
     const budgetNote = input.budget != null ? `，预算${input.budget}元` : '';
-    return `${input.city ?? "南京"} CityWalk：从${input.startPoint ?? "新街口"}出发，${input.durationMinutes ?? 180}分钟${budgetNote}，偏好${(input.preferences ?? ["书店", "咖啡"]).join("、")}`;
+    const timeNote = input.durationMinutes != null ? `${input.durationMinutes}分钟` : '不限时';
+    return `${input.city ?? "南京"} CityWalk：从${input.startPoint ?? "新街口"}出发，${timeNote}${budgetNote}，偏好${(input.preferences ?? ["书店", "咖啡"]).join("、")}`;
   }
 }

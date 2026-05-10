@@ -1,7 +1,7 @@
 export interface UserConstraints {
   city: string;
   startPoint: string;
-  durationMinutes: number;
+  durationMinutes?: number;   // undefined = no time limit
   budget?: number;            // undefined = no budget limit
   preferences: string[];
   peopleCount?: number;
