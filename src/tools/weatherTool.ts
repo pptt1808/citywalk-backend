@@ -44,7 +44,8 @@ export class WeatherTool {
     if (cached) return cached;
 
     if (!env.QWEATHER_KEY) {
-      return this.mockWeatherContext(city);
+      console.warn("[WeatherTool] QWEATHER_KEY not set — weather data unavailable");
+      return { rainProbability: 0, risk: "low", summary: `${city} 天气数据不可用`, indices: [] };
     }
 
     try {
@@ -97,7 +98,7 @@ export class WeatherTool {
       cache.set(cacheKey, result, WEATHER_CACHE_TTL);
       return result;
     } catch {
-      return this.mockWeatherContext(city);
+      return { rainProbability: 0, risk: "low", summary: `${city} 天气数据不可用`, indices: [] };
     }
   }
 
@@ -148,7 +149,8 @@ export class WeatherTool {
 
   async getWeatherIndices(locationIdOrCity: string, type = "1,5,8"): Promise<WeatherContext["indices"]> {
     if (!env.QWEATHER_KEY) {
-      return this.mockWeatherContext(locationIdOrCity).indices;
+      console.warn("[WeatherTool] QWEATHER_KEY not set — weather indices unavailable");
+      return [];
     }
 
     const location = /^\d+$/.test(locationIdOrCity) ? locationIdOrCity : await this.lookupLocation(locationIdOrCity);
@@ -165,7 +167,8 @@ export class WeatherTool {
 
   async getAirQuality(locationIdOrCity: string): Promise<NonNullable<WeatherContext["airQuality"]> | undefined> {
     if (!env.QWEATHER_KEY) {
-      return this.mockWeatherContext(locationIdOrCity).airQuality;
+      console.warn("[WeatherTool] QWEATHER_KEY not set — air quality unavailable");
+      return undefined;
     }
 
     const location = /^\d+$/.test(locationIdOrCity) ? locationIdOrCity : await this.lookupLocation(locationIdOrCity);
@@ -226,35 +229,6 @@ export class WeatherTool {
     if (typeof aqi === "number" && aqi >= 100) return "medium";
     if (rainProbability >= 30) return "medium";
     return "low";
-  }
-
-  private mockWeatherContext(city: string): WeatherContext {
-    return {
-      rainProbability: 45,
-      risk: "medium",
-      summary: `${city} 未来有中等降雨可能，建议准备室内备选点位`,
-      indices: [
-        {
-          name: "舒适度指数",
-          category: "较舒适",
-          text: "适合轻量城市漫步，建议关注短时降雨。"
-        },
-        {
-          name: "运动指数",
-          category: "较适宜",
-          text: "适合步行，但长时间户外需预留休息点。"
-        }
-      ],
-      minutely: {
-        summary: "未来两小时有零星降水可能",
-        items: []
-      },
-      airQuality: {
-        aqi: 45,
-        category: "优",
-        primary: "NA"
-      }
-    };
   }
 
   private toQWeatherLonLat(location: string): string {
