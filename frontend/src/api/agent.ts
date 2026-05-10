@@ -205,6 +205,27 @@ export async function apiCreatePlanStream(req: PlanRequest, cbs: SseCallbacks): 
 
   const decoder = new TextDecoder()
   let buffer = ''
+  let currentEvent = ''
+
+  function processLine(line: string) {
+    if (line.startsWith('event: ')) {
+      currentEvent = line.slice(7).trim()
+    } else if (line.startsWith('data: ')) {
+      const data = line.slice(6)
+      try {
+        const parsed = JSON.parse(data)
+        if (currentEvent === 'state') {
+          cbs.onEvents(parsed.events ?? [])
+        } else if (currentEvent === 'done') {
+          cbs.onResult(parsed.result)
+        } else if (currentEvent === 'stream_error') {
+          cbs.onError(parsed.message ?? 'Stream error')
+        }
+      } catch {
+        // skip unparseable lines
+      }
+    }
+  }
 
   try {
     while (true) {
@@ -215,26 +236,13 @@ export async function apiCreatePlanStream(req: PlanRequest, cbs: SseCallbacks): 
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
 
-      let currentEvent = ''
       for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          currentEvent = line.slice(7).trim()
-        } else if (line.startsWith('data: ')) {
-          const data = line.slice(6)
-          try {
-            const parsed = JSON.parse(data)
-            if (currentEvent === 'state') {
-              cbs.onEvents(parsed.events ?? [])
-            } else if (currentEvent === 'done') {
-              cbs.onResult(parsed.result)
-            } else if (currentEvent === 'stream_error') {
-              cbs.onError(parsed.message ?? 'Stream error')
-            }
-          } catch {
-            // skip unparseable lines
-          }
-        }
+        processLine(line)
       }
+    }
+    // Flush remaining buffer after stream ends
+    if (buffer.trim()) {
+      processLine(buffer)
     }
   } finally {
     reader.releaseLock()
