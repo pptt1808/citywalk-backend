@@ -33,8 +33,17 @@ async function removeEntry(id: string) {
 
 function reuseEntry(entry: HistoryEntry) {
   agent.reset()
-  // trigger a new plan with the same request
   setTimeout(() => agent.run(entry.request), 100)
+}
+
+function viewEntry(entry: HistoryEntry) {
+  agent.result.value = entry.result
+  agent.visibleEvents.value = entry.result.events ?? []
+  agent.visibleSteps.value = entry.result.planSteps ?? []
+  agent.rawJson.value = JSON.stringify(entry.result, null, 2)
+  // Brief streaming→done transition so AgentConsole auto-switches to result tab
+  agent.status.value = 'streaming'
+  setTimeout(() => { agent.status.value = 'done' }, 150)
 }
 
 function formatDate(iso: string): string {
@@ -92,15 +101,18 @@ onMounted(loadHistory)
 
           <!-- Expanded detail -->
           <div v-if="expandedId === entry.id" class="hp-detail">
+            <p class="hp-detail-summary">{{ entry.result.summary }}</p>
             <div class="hp-detail-stops">
               <div v-for="(stop, i) in entry.result.stops" :key="i" class="hp-stop">
                 <span class="hp-stop-num">{{ i + 1 }}</span>
                 <span>{{ CAT_ICON[stop.category] }}</span>
                 <span class="hp-stop-name">{{ stop.name }}</span>
                 <span class="hp-stop-cost">¥{{ stop.estimatedCost }}</span>
+                <span class="hp-stop-time">{{ stop.estimatedStayMinutes }}min</span>
               </div>
             </div>
             <div class="hp-detail-actions">
+              <button class="hp-btn-view" @click="viewEntry(entry)">查看完整结果</button>
               <button class="hp-btn-reuse" @click="reuseEntry(entry)">重新规划</button>
               <button class="hp-btn-delete" @click="removeEntry(entry.id)">删除</button>
             </div>
@@ -181,6 +193,10 @@ onMounted(loadHistory)
   padding: 0 14px 12px;
   display: flex; flex-direction: column; gap: 8px;
 }
+.hp-detail-summary {
+  font-size: 12px; color: var(--text); line-height: 1.55;
+  padding: 6px 8px; background: var(--bg); border-radius: 6px;
+}
 .hp-detail-stops { display: flex; flex-direction: column; gap: 3px; }
 .hp-stop {
   display: flex; align-items: center; gap: 6px;
@@ -195,12 +211,16 @@ onMounted(loadHistory)
 }
 .hp-stop-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-h); }
 .hp-stop-cost { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+.hp-stop-time { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
 
-.hp-detail-actions { display: flex; gap: 8px; }
-.hp-btn-reuse, .hp-btn-delete {
+.hp-detail-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.hp-btn-view, .hp-btn-reuse, .hp-btn-delete {
   flex: 1; padding: 6px 0; border-radius: 6px; border: 1px solid;
   font-size: 12px; font-family: var(--font-sans); cursor: pointer;
-  transition: opacity .15s;
+  transition: opacity .15s; min-width: 70px;
+}
+.hp-btn-view {
+  background: var(--c-plan); border-color: var(--c-plan); color: #fff;
 }
 .hp-btn-reuse {
   background: var(--accent-dim); border-color: var(--accent-border); color: var(--accent);
@@ -208,7 +228,7 @@ onMounted(loadHistory)
 .hp-btn-delete {
   background: var(--bg); border-color: var(--border); color: var(--text-muted);
 }
-.hp-btn-reuse:hover, .hp-btn-delete:hover { opacity: .8; }
+.hp-btn-view:hover, .hp-btn-reuse:hover, .hp-btn-delete:hover { opacity: .8; }
 
 @keyframes shimmer {
   0% { background-position: 200% 0; }

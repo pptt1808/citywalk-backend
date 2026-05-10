@@ -15,6 +15,13 @@ const weatherInfo = computed(() => {
   return { text: '—', icon: '—', cls: '' }
 })
 
+const routeMinutes = computed(() =>
+  (result.value?.routeLegs ?? []).reduce((s, l) => s + l.durationMinutes, 0)
+)
+const stayMinutes = computed(() =>
+  (result.value?.stops ?? []).reduce((s, st) => s + st.estimatedStayMinutes, 0)
+)
+
 function formatTime(minutes: number): string {
   const h = Math.floor(minutes / 60)
   const m = minutes % 60
@@ -49,7 +56,7 @@ function formatTime(minutes: number): string {
       <div class="stat-item">
         <span class="stat-icon">⏱</span>
         <span class="stat-val">{{ formatTime(result.totalEstimatedMinutes) }}</span>
-        <span class="stat-label">预计时长</span>
+        <span class="stat-label">🚶{{ formatTime(routeMinutes) }} + 🛑{{ formatTime(stayMinutes) }}</span>
       </div>
       <div class="stat-divider" />
       <div class="stat-item">

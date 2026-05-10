@@ -10,6 +10,7 @@ interface PoiEnrichmentInput {
 
 interface PoiEnrichmentOutput {
   estimatedCost: number;
+  estimatedStayMinutes: number;
   costBreakdown: string;
   highlight: string;
   bookingInfo: string;
@@ -123,6 +124,7 @@ export class LlmRouter {
         role: "system",
         content: `你是 CityWalk Pulse 的 POI 信息官。对每个地点，根据你的知识给出：
 - estimatedCost：该地点合理的人均预估消费（数字，单位元）
+- estimatedStayMinutes：合理的停留时间（数字，单位分钟。书店/咖啡20-40，景点30-50，博物馆40-70，商场30-50，公园20-40，餐厅30-60），不要给太长的停留时间
 - costBreakdown：一句话说明费用来源（如"博物馆免费入场，特展另收30元"、"一杯手冲+甜点约40-55元"）
 - highlight：一句话描述该地点的独特亮点，让人想去
 - bookingInfo：是否需要提前预约（如"需提前3天在公众号预约"、"需在XX小程序预约，现场刷身份证入场"、"免预约，直接前往即可"、"周末建议提前1天电话预约"）

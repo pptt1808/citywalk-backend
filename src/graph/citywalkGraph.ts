@@ -413,6 +413,7 @@ export class CityWalkGraphRunner {
       selectedStops = selectedStops.map((stop, i) => ({
         ...stop,
         estimatedCost: enriched.data[i].estimatedCost,
+        estimatedStayMinutes: enriched.data[i].estimatedStayMinutes,
         costBreakdown: enriched.data[i].costBreakdown,
         highlight: enriched.data[i].highlight,
         bookingInfo: enriched.data[i].bookingInfo
