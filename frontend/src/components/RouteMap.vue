@@ -34,15 +34,13 @@ const hasCoordinates = computed(() =>
 
 let amapScriptPromise: Promise<void> | null = null
 
-let walkingPluginReady = false
-
 function loadAmapScript(): Promise<void> {
   const key = (import.meta as any).env?.VITE_AMAP_KEY
   if (!key) {
     console.warn('[RouteMap] VITE_AMAP_KEY is not set — map disabled')
     return Promise.reject(new Error('Missing AMap key'))
   }
-  if ((window as any).AMap && walkingPluginReady) return Promise.resolve()
+  if ((window as any).AMap) return Promise.resolve()
 
   const security = (import.meta as any).env?.VITE_AMAP_SECURITY
   if (security) {
@@ -51,20 +49,9 @@ function loadAmapScript(): Promise<void> {
 
   return new Promise((resolve, reject) => {
     const script = document.createElement('script')
-    script.src = `https://webapi.amap.com/maps?v=2.0&key=${key}&plugin=AMap.Walking`
+    script.src = `https://webapi.amap.com/maps?v=2.0&key=${key}`
     script.async = true
-    script.onload = () => {
-      // Wait for plugin to be ready
-      const AMap = (window as any).AMap
-      if (AMap) {
-        AMap.plugin('AMap.Walking', () => {
-          walkingPluginReady = true
-          resolve()
-        })
-      } else {
-        reject(new Error('AMap not available after script load'))
-      }
-    }
+    script.onload = () => resolve()
     script.onerror = () => reject(new Error('AMap script load failed'))
     document.head.appendChild(script)
   })
@@ -94,20 +81,13 @@ function createMap(container: HTMLElement, opts: any) {
 
 // ── Render ──
 
-const walkingRoutes: any[] = []
-
-function clearAll() {
-  markers.forEach((m: any) => m.setMap(null))
-  markers.length = 0
-  if (polyline) { polyline.setMap(null); polyline = null }
-  walkingRoutes.forEach((w: any) => { try { w.clear() } catch {} })
-  walkingRoutes.length = 0
-}
-
 function renderMap() {
   if (!mapInstance || !mapContainer.value) return
 
-  clearAll()
+  // Clear old
+  markers.forEach((m: any) => m.setMap(null))
+  markers.length = 0
+  if (polyline) { polyline.setMap(null); polyline = null }
 
   const coords: [number, number][] = []
 
@@ -152,34 +132,21 @@ function renderMap() {
     markers.push(marker)
   })
 
-  // Draw actual walking routes with AMap.Walking plugin
-  const AMap = (window as any).AMap
-  if (AMap && walkingPluginReady && coords.length >= 2) {
-    for (let i = 0; i < coords.length - 1; i++) {
-      const from = coords[i]
-      const to = coords[i + 1]
-      const leg = props.routeLegs?.[i]
-      if (!leg || leg.mode === 'walk') {
-        const walking = new AMap.Walking({
-          map: mapInstance,
-          hideMarkers: true,
-          panel: undefined as any
-        })
-        walkingRoutes.push(walking)
-        walking.search(from, to)
-      } else {
-        // Transit: dashed line in blue
-        const line = createPolyline({
-          path: [from, to],
-          strokeColor: '#0ea5e9',
-          strokeWeight: 3,
-          strokeOpacity: 0.6,
-          strokeStyle: 'dashed',
-          zIndex: 45
-        })
-        line.setMap(mapInstance)
-        markers.push(line)
-      }
+  // Polylines: walk=orange dashed, transit=blue dashed
+  if (coords.length >= 2 && props.routeLegs?.length) {
+    for (let i = 0; i < props.routeLegs.length && i < coords.length - 1; i++) {
+      const leg = props.routeLegs[i]
+      const isTransit = leg.mode === 'transit'
+      const line = createPolyline({
+        path: [coords[i], coords[i + 1]],
+        strokeColor: isTransit ? '#0ea5e9' : '#d4570a',
+        strokeWeight: 3,
+        strokeOpacity: 0.7,
+        strokeStyle: 'dashed',
+        zIndex: 50
+      })
+      line.setMap(mapInstance)
+      markers.push(line)
     }
   }
 
@@ -239,8 +206,9 @@ async function initMap() {
 onMounted(() => { initMap() })
 
 onUnmounted(() => {
-  clearAll()
-  walkingRoutes.forEach((w: any) => { try { w.clear() } catch {} })
+  markers.forEach((m: any) => m.setMap(null))
+  markers.length = 0
+  if (polyline) { polyline.setMap(null); polyline = null }
   if (mapInstance) { mapInstance.destroy(); mapInstance = null }
 })
 

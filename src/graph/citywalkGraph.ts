@@ -728,13 +728,23 @@ export class CityWalkGraphRunner {
     const stops = state.selectedStops;
     const legs = state.routeLegs ?? [];
 
+    const modeLabel = (mode: string) => mode === "transit" ? "公交地铁" : "步行";
+
     const routeParts = stops.map((stop, index) => {
-      const legInfo = legs[index] ? `步行${legs[index].durationMinutes}分钟` : '';
-      const prefix = index === 0 ? `从${state.constraints.startPoint}` : '';
-      return `${index + 1}. ${prefix}${legInfo ? `${legInfo}到达 ` : ''}${stop.name}（停留${stop.estimatedStayMinutes}分钟，约${stop.estimatedCost}元）`;
+      const leg = legs[index];
+      const legInfo = leg ? `${modeLabel(leg.mode)}${leg.durationMinutes}分钟` : '';
+      if (index === 0) {
+        return `${index + 1}. 从${state.constraints.startPoint}出发，${legInfo}到达 ${stop.name}（停留${stop.estimatedStayMinutes}分钟，约${stop.estimatedCost}元）`;
+      }
+      return `${index + 1}. ${legInfo}到达 ${stop.name}（停留${stop.estimatedStayMinutes}分钟，约${stop.estimatedCost}元）`;
     });
 
     const route = routeParts.join('。');
+    const walkTime = legs.filter(l => l.mode === 'walk').reduce((s, l) => s + l.durationMinutes, 0);
+    const transitTime = legs.filter(l => l.mode === 'transit').reduce((s, l) => s + l.durationMinutes, 0);
+    const timeBreakdown = [walkTime > 0 && `步行${walkTime}分钟`, transitTime > 0 && `公交地铁${transitTime}分钟`].filter(Boolean).join(' + ');
+    const stayTime = stops.reduce((s, st) => s + st.estimatedStayMinutes, 0);
+
     const weatherNote =
       state.weatherRisk === "high"
         ? "当前方案已按高天气风险优先选择室内点位。"
@@ -742,7 +752,7 @@ export class CityWalkGraphRunner {
           ? "当前方案保留室内备选，适合应对短时降雨。"
           : "天气风险较低，适合常规 CityWalk。";
 
-    return `从${state.constraints.startPoint}出发，推荐 ${stops.length} 个点位：${route}。预计总花费 ${state.totalEstimatedCost} 元，总时长约 ${state.totalEstimatedMinutes} 分钟（步行${state.routeLegs?.reduce((s, l) => s + l.durationMinutes, 0) ?? 0}分钟 + 停留${stops.reduce((s, st) => s + st.estimatedStayMinutes, 0)}分钟）。${weatherNote}`;
+    return `从${state.constraints.startPoint}出发，推荐 ${stops.length} 个点位：${route}。预计总花费 ${state.totalEstimatedCost} 元，总时长约 ${state.totalEstimatedMinutes} 分钟（路程${timeBreakdown} + 停留${stayTime}分钟）。${weatherNote}`;
   }
 
   private completeStep(steps: AgentPlanStep[], stepId: string): AgentPlanStep[] {

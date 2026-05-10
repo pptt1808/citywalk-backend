@@ -35,9 +35,8 @@ const summaryStruct = computed<SummaryStructure>(() => {
   const introMatch = s.match(/^(.+?推荐\s*\d+\s*个点位[：:])/)
   const intro = introMatch ? introMatch[1] : (s.split(/[。：:]/)[0] ?? s)
 
-  // Extract stops: handles both old format "1. 先锋书店（30分钟，约30元）"
-  // and new format "1. 步行15分钟到达 先锋书店（停留30分钟，约30元）"
-  const stopRegex = /(\d+)\.\s*(?:[^。]+到达\s*)?(.+?)（(?:停留)?(\d+)分钟[，,]\s*约(\d+)元）/g
+  // Extract stops: handles "1. 从XX出发，步行15分钟到达 先锋书店（停留30分钟，约30元）"
+  const stopRegex = /(\d+)\.\s*(?:从[^，]+出发，\s*)?[^到达]+到达\s*(.+?)（停留(\d+)分钟[，,]\s*约(\d+)元）/g
   const stops: SummaryStructure['stops'] = []
   let m: RegExpExecArray | null
   while ((m = stopRegex.exec(s)) !== null) {
