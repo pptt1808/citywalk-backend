@@ -22,14 +22,36 @@ const stayMinutes = computed(() =>
   (result.value?.stops ?? []).reduce((s, st) => s + st.estimatedStayMinutes, 0)
 )
 
-// Parse summary into structured sections
-const summaryParts = computed(() => {
+// Parse LLM summary into structured parts
+interface SummaryStructure {
+  intro: string        // "从X出发，推荐Y个点位"
+  stops: Array<{ name: string; stay: string; cost: string }>
+  costInfo: string     // "预计总花费 X 元，总时长约 Y 分钟"
+  weatherNote: string  // weather note
+}
+const summaryStruct = computed<SummaryStructure>(() => {
   const s = result.value?.summary ?? ''
-  // Split on Chinese-style delimiters: "。" "；" "。"
-  const sentences = s.split(/[。；;]/).map(p => p.trim()).filter(Boolean)
-  const route = sentences[0] ?? s
-  const rest = sentences.slice(1).join(' · ')
-  return { route, rest }
+  // Extract intro (before the first numbered stop)
+  const introMatch = s.match(/^(.+?推荐\s*\d+\s*个点位[：:])/)
+  const intro = introMatch ? introMatch[1] : s.split(/[。；]/)[0]
+
+  // Extract individual stops
+  const stopRegex = /(\d+)\.\s*(.+?)（(\d+)分钟，约(\d+)元）/g
+  const stops: SummaryStructure['stops'] = []
+  let m: RegExpExecArray | null
+  while ((m = stopRegex.exec(s)) !== null) {
+    stops.push({ name: m[2], stay: m[3] + '分钟', cost: '¥' + m[4] })
+  }
+
+  // Extract cost/time info
+  const costMatch = s.match(/预计总花费\s*(\d+)\s*元[，,\s]*总时长约\s*(\d+)\s*分钟/)
+  const costInfo = costMatch ? `预计总花费 ¥${costMatch[1]}，总时长约 ${costMatch[2]} 分钟` : ''
+
+  // Extract weather note (last sentence after final period)
+  const weatherMatch = s.match(/。\s*([^。]+(?:适合|风险|CityWalk|漫步)[^。]*)。?\s*$/)
+  const weatherNote = weatherMatch ? weatherMatch[1] : ''
+
+  return { intro, stops, costInfo, weatherNote }
 })
 
 function formatTime(minutes: number): string {
@@ -65,8 +87,17 @@ const statCards = computed(() => [
       </div>
       <div class="hero-body">
         <span class="hero-badge">路线规划完成</span>
-        <p class="hero-summary">{{ summaryParts.route }}</p>
-        <p class="hero-detail" v-if="summaryParts.rest">{{ summaryParts.rest }}</p>
+        <p class="hero-intro">{{ summaryStruct.intro }}</p>
+        <div class="hero-stops" v-if="summaryStruct.stops.length">
+          <span v-for="(s, i) in summaryStruct.stops" :key="i" class="hero-stop-chip">
+            <strong>{{ i + 1 }}.</strong> {{ s.name }}
+            <span class="hero-stop-meta">🕐{{ s.stay }} 💰{{ s.cost }}</span>
+          </span>
+        </div>
+        <div class="hero-footer" v-if="summaryStruct.costInfo">
+          <span>{{ summaryStruct.costInfo }}</span>
+          <span v-if="summaryStruct.weatherNote" class="hero-weather">{{ weatherInfo.icon }} {{ summaryStruct.weatherNote }}</span>
+        </div>
       </div>
     </div>
 
@@ -147,20 +178,6 @@ const statCards = computed(() => [
       </div>
     </div>
 
-    <!-- ── Corrections ── -->
-    <div class="corrections-section" v-if="result.corrections?.length">
-      <div class="section-header">
-        <span class="section-dot warn" />
-        <span class="section-title">自动修正记录</span>
-      </div>
-      <div class="corrections-card">
-        <div v-for="(c, i) in result.corrections" :key="i" class="corr-item">
-          <span class="corr-num">{{ i + 1 }}</span>
-          <span>{{ c }}</span>
-        </div>
-      </div>
-    </div>
-
   </div>
 </template>
 
@@ -197,14 +214,35 @@ const statCards = computed(() => [
   font-size: 10px; font-weight: 700; text-transform: uppercase;
   letter-spacing: .1em; color: var(--accent);
   background: #fff5f0; border: 1px solid var(--accent-border);
-  padding: 3px 10px; border-radius: 999px; margin-bottom: 8px;
+  padding: 3px 10px; border-radius: 999px; margin-bottom: 10px;
 }
-.hero-summary {
-  font-size: 18px; font-weight: 700; color: #1e1918;
-  line-height: 1.6; letter-spacing: -.01em;
+.hero-intro {
+  font-size: 16px; font-weight: 700; color: #1e1918;
+  line-height: 1.6; letter-spacing: -.01em; margin-bottom: 10px;
 }
-.hero-detail {
-  font-size: 13px; color: #6b615c; margin-top: 4px; line-height: 1.55;
+.hero-stops {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;
+}
+.hero-stop-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 6px 12px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; font-size: 13px; color: var(--text-h);
+  transition: border-color .15s;
+}
+.hero-stop-chip:hover { border-color: var(--accent-border); }
+.hero-stop-meta {
+  font-size: 11px; color: var(--text-muted); margin-left: 2px;
+}
+.hero-footer {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
+  padding-top: 8px; border-top: 1px solid #e8dfd4;
+  font-size: 13px; color: #6b615c;
+}
+.hero-weather {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 10px; border-radius: 999px;
+  background: #f0fdf4; color: #065f46; font-size: 12px;
 }
 
 /* ── Stat grid ── */
@@ -351,26 +389,6 @@ const statCards = computed(() => [
 .tl-info-cost { background: #fefce8; color: #854d0e; }
 .tl-info-book { background: #f0f9ff; color: #075985; }
 .tl-info-warn { background: #fef2f2; color: #991b1b; }
-
-/* ── Corrections ── */
-.corrections-section {
-  display: flex; flex-direction: column; gap: 8px;
-}
-.corrections-card {
-  background: #fff9f5; border: 1px solid #fed7aa;
-  border-radius: var(--radius); padding: 8px 0;
-  display: flex; flex-direction: column;
-}
-.corr-item {
-  display: flex; align-items: flex-start; gap: 10px;
-  padding: 7px 16px; font-size: 12.5px; color: #7c2d12; line-height: 1.5;
-}
-.corr-num {
-  width: 18px; height: 18px; border-radius: 50%;
-  background: #fed7aa; color: #7c2d12;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 1px;
-}
 
 /* Anim */
 .animate-fade-in { animation: fadeSlideIn .3s ease both; }

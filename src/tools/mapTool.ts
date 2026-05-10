@@ -132,7 +132,6 @@ export class MapTool {
       return this.mockRoute(origin, destinations, mode === "transit" ? "transit" : "walk");
     }
 
-    const routeMode = mode === "mixed" ? "walk" : mode;
     const legs: RouteLeg[] = [];
     let current = origin;
     for (const destination of destinations) {
@@ -141,12 +140,21 @@ export class MapTool {
       }
 
       try {
-        const leg = routeMode === "transit"
-          ? await this.planTransitRoute(current, destination, city)
-          : await this.planWalkingRoute(current, destination);
-        legs.push(leg);
+        if (mode === "transit") {
+          legs.push(await this.planTransitRoute(current, destination, city));
+        } else if (mode === "walk") {
+          legs.push(await this.planWalkingRoute(current, destination));
+        } else {
+          // "mixed": try walk first, switch to transit if too far
+          const walkLeg = await this.planWalkingRoute(current, destination);
+          if (walkLeg.durationMinutes > 45 || walkLeg.distanceMeters > 3000) {
+            legs.push(await this.planTransitRoute(current, destination, city));
+          } else {
+            legs.push(walkLeg);
+          }
+        }
       } catch {
-        legs.push(...this.mockRoute(current, [destination], routeMode));
+        legs.push(...this.mockRoute(current, [destination], mode === "transit" ? "transit" : "walk"));
       }
 
       current = destination;
@@ -232,7 +240,9 @@ export class MapTool {
     }>("/v3/direction/transit/integrated", {
       origin,
       destination,
-      city
+      city,
+      city1: city,
+      strategy: "0"  // 0 = 最快捷模式（地铁优先），5 = 不乘地铁
     });
     const transit = data.route?.transits?.[0];
     return {
