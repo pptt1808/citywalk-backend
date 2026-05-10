@@ -31,23 +31,24 @@ interface SummaryStructure {
 }
 const summaryStruct = computed<SummaryStructure>(() => {
   const s = result.value?.summary ?? ''
-  // Extract intro (before the first numbered stop)
+  // Extract intro (before the colon with numbered stops)
   const introMatch = s.match(/^(.+?推荐\s*\d+\s*个点位[：:])/)
-  const intro = introMatch ? introMatch[1] : s.split(/[。；]/)[0]
+  const intro = introMatch ? introMatch[1] : (s.split(/[。：:]/)[0] ?? s)
 
-  // Extract individual stops
-  const stopRegex = /(\d+)\.\s*(.+?)（(\d+)分钟，约(\d+)元）/g
+  // Extract stops: handles both old format "1. 先锋书店（30分钟，约30元）"
+  // and new format "1. 步行15分钟到达 先锋书店（停留30分钟，约30元）"
+  const stopRegex = /(\d+)\.\s*(?:[^。]+到达\s*)?(.+?)（(?:停留)?(\d+)分钟[，,]\s*约(\d+)元）/g
   const stops: SummaryStructure['stops'] = []
   let m: RegExpExecArray | null
   while ((m = stopRegex.exec(s)) !== null) {
-    stops.push({ name: m[2], stay: m[3] + '分钟', cost: '¥' + m[4] })
+    stops.push({ name: m[2].trim(), stay: m[3] + '分钟', cost: '¥' + m[4] })
   }
 
   // Extract cost/time info
   const costMatch = s.match(/预计总花费\s*(\d+)\s*元[，,\s]*总时长约\s*(\d+)\s*分钟/)
   const costInfo = costMatch ? `预计总花费 ¥${costMatch[1]}，总时长约 ${costMatch[2]} 分钟` : ''
 
-  // Extract weather note (last sentence after final period)
+  // Extract weather note
   const weatherMatch = s.match(/。\s*([^。]+(?:适合|风险|CityWalk|漫步)[^。]*)。?\s*$/)
   const weatherNote = weatherMatch ? weatherMatch[1] : ''
 
