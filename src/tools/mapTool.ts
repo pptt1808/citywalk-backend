@@ -340,7 +340,15 @@ export class MapTool {
         { name: "德基广场", category: "mall", averageCost: 45, rating: 4.7, indoor: true },
         { name: "颐和路街区", category: "sight", averageCost: 0, rating: 4.4, indoor: false },
         { name: "玄武湖公园", category: "park", averageCost: 0, rating: 4.6, indoor: false },
-        { name: "南京大牌档", category: "restaurant", averageCost: 65, rating: 4.3, indoor: true }
+        { name: "南京大牌档", category: "restaurant", averageCost: 65, rating: 4.3, indoor: true },
+        { name: "羊山公园", category: "park", averageCost: 0, rating: 4.3, indoor: false },
+        { name: "仙林湖公园", category: "park", averageCost: 0, rating: 4.4, indoor: false },
+        { name: "南大仙林图书馆", category: "bookstore", averageCost: 0, rating: 4.6, indoor: true },
+        { name: "仙林金鹰", category: "mall", averageCost: 50, rating: 4.4, indoor: true },
+        { name: "学则路美食街", category: "restaurant", averageCost: 40, rating: 4.2, indoor: true },
+        { name: "万达茂", category: "mall", averageCost: 45, rating: 4.3, indoor: true },
+        { name: "栖霞山", category: "sight", averageCost: 25, rating: 4.6, indoor: false },
+        { name: "仙林大学城奶茶街", category: "cafe", averageCost: 20, rating: 4.1, indoor: true },
       ],
       "北京": [
         { name: "PageOne 书店", category: "bookstore", averageCost: 35, rating: 4.7, indoor: true },
@@ -388,7 +396,7 @@ export class MapTool {
   private normalizeKeywords(keywords: string[] | unknown): string[] {
     if (Array.isArray(keywords)) {
       const normalized = keywords.map((keyword) => String(keyword).trim()).filter(Boolean);
-      return normalized.length > 0 ? normalized : ["书店", "咖啡", "博物馆"];
+      return normalized.length > 0 ? normalized : ["书店", "咖啡", "博物馆", "公园", "景点", "美食", "奶茶"];
     }
     if (typeof keywords === "string" && keywords.trim()) {
       return keywords
@@ -396,7 +404,7 @@ export class MapTool {
         .map((keyword) => keyword.trim())
         .filter(Boolean);
     }
-    return ["书店", "咖啡", "博物馆"];
+    return ["书店", "咖啡", "博物馆", "公园", "景点", "美食", "奶茶"];
   }
 
   private mockRoute(origin: string, destinations: string[], mode: "walk" | "transit" | "bicycling"): RouteLeg[] {

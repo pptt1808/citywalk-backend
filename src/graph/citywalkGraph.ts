@@ -201,10 +201,21 @@ export class CityWalkGraphRunner {
       ?? fallbackConstraints.durationMinutes;
 
     const matchedBudget = this.matchBudget(state.task);
+    // Budget: only set if user explicitly mentioned it. Otherwise no limit.
     const budget = state.rawInput.budget
       ?? matchedBudget
-      ?? llmParsed?.data.budget
-      ?? fallbackConstraints.budget;
+      ?? (llmParsed?.data as Record<string, unknown> | undefined)?.budget as number | undefined
+      ?? undefined;
+
+    const matchedEndPoint = this.matchEndPoint(state.task);
+    const endPoint = state.rawInput.endPoint
+      ?? matchedEndPoint
+      ?? (llmParsed?.data as Record<string, unknown> | undefined)?.endPoint as string | undefined;
+
+    const matchedMaxLeg = this.matchMaxLegMinutes(state.task);
+    const maxLegMinutes = state.rawInput.maxLegMinutes
+      ?? matchedMaxLeg
+      ?? (llmParsed?.data as Record<string, unknown> | undefined)?.maxLegMinutes as number | undefined;
 
     const preferences = state.rawInput.preferences?.length
       ? state.rawInput.preferences
@@ -221,12 +232,18 @@ export class CityWalkGraphRunner {
       peopleCount: state.rawInput.peopleCount ?? llmParsed?.data.peopleCount ?? fallbackConstraints.peopleCount,
       transportMode: state.rawInput.transportMode ?? llmParsed?.data.transportMode ?? fallbackConstraints.transportMode,
       weatherPreference: state.rawInput.weatherPreference ?? llmParsed?.data.weatherPreference ?? fallbackConstraints.weatherPreference,
-      weatherRisk: state.rawInput.weatherRisk ?? llmParsed?.data.weatherRisk ?? fallbackConstraints.weatherRisk
+      weatherRisk: state.rawInput.weatherRisk ?? llmParsed?.data.weatherRisk ?? fallbackConstraints.weatherRisk,
+      endPoint,
+      maxLegMinutes
     };
     const content = llmParsed
       ? `使用 ${llmParsed.model} 解析自然语言约束，并合并表单显式字段。`
       : "未配置可用 LLM，使用启发式解析自然语言与表单约束。";
     const event = this.event("THINK", content, state, "parse");
+
+    const budgetNote = constraints.budget != null ? `预算=${constraints.budget}元，` : '';
+    const endNote = constraints.endPoint ? `终点=${constraints.endPoint}，` : '';
+    const legNote = constraints.maxLegMinutes ? `单段≤${constraints.maxLegMinutes}分钟，` : '';
 
     return {
       constraints,
@@ -235,7 +252,7 @@ export class CityWalkGraphRunner {
       traceSteps: [{ type: "thought", content: event.content }],
       llmModels: llmParsed ? [`${llmParsed.provider}:${llmParsed.model}`] : [],
       decisionLog: [
-        `解析约束：城市=${constraints.city}，起点=${constraints.startPoint}，时长=${constraints.durationMinutes}分钟，预算=${constraints.budget}元`
+        `解析约束：城市=${constraints.city}，起点=${constraints.startPoint}，时长=${constraints.durationMinutes}分钟，${budgetNote}${endNote}${legNote}偏好=${(constraints.preferences ?? []).join("、") || "默认"}`
       ]
     };
   }
@@ -365,12 +382,31 @@ export class CityWalkGraphRunner {
       tool: startLocation ? "search_poi_nearby" : "search_poi",
       input
     });
-    const candidatePois = await this.mapTool.searchNearbyPoi(state.constraints.preferences, {
+    let candidatePois = await this.mapTool.searchNearbyPoi(state.constraints.preferences, {
       city: state.constraints.city,
       location: startLocation,
-      indoorOnly
+      indoorOnly,
+      radius: 5000
     });
-    const obs = this.event("OBS", `地图工具返回 ${candidatePois.length} 个候选点。`, state, step.id, {
+
+    // If user specified an endPoint, add it as a required last stop
+    let endPointPoi: Poi | undefined;
+    if (state.constraints.endPoint) {
+      const epLocation = await this.mapTool.geocode(state.constraints.endPoint, state.constraints.city);
+      if (epLocation) {
+        endPointPoi = {
+          name: state.constraints.endPoint,
+          category: "sight" as const,
+          averageCost: 0,
+          location: epLocation,
+          address: state.constraints.endPoint,
+          rating: 4.0,
+          indoor: false
+        };
+        candidatePois.push(endPointPoi);
+      }
+    }
+    const obs = this.event("OBS", `地图工具返回 ${candidatePois.length} 个候选点${endPointPoi ? `（含指定终点：${endPointPoi.name}）` : ''}。`, state, step.id, {
       tool: startLocation ? "search_poi_nearby" : "search_poi",
       input,
       output: candidatePois
@@ -566,9 +602,11 @@ export class CityWalkGraphRunner {
     const city = input.city ?? this.matchCity(task) ?? "南京";
     const startPoint = input.startPoint ?? this.matchStartPoint(task) ?? "新街口";
     const durationMinutes = input.durationMinutes ?? this.matchDuration(task) ?? 180;
-    const budget = input.budget ?? this.matchBudget(task) ?? 100;
+    const budget = input.budget ?? this.matchBudget(task) ?? undefined;
     const preferences = input.preferences?.length ? input.preferences : this.matchPreferences(task);
     const weatherPreference = input.weatherPreference ?? (/室内|避雨|下雨|雨天/.test(task) ? "indoor_first" : "outdoor_ok");
+    const endPoint = input.endPoint ?? this.matchEndPoint(task);
+    const maxLegMinutes = input.maxLegMinutes ?? this.matchMaxLegMinutes(task);
 
     return {
       city,
@@ -579,7 +617,9 @@ export class CityWalkGraphRunner {
       peopleCount: input.peopleCount ?? this.matchPeopleCount(task) ?? 1,
       transportMode: input.transportMode ?? (/地铁|公交/.test(task) ? "transit" : "mixed"),
       weatherPreference,
-      weatherRisk: input.weatherRisk
+      weatherRisk: input.weatherRisk,
+      endPoint,
+      maxLegMinutes
     };
   }
 
@@ -603,7 +643,7 @@ export class CityWalkGraphRunner {
       city: input.city ?? "南京",
       startPoint: input.startPoint ?? "新街口",
       durationMinutes: input.durationMinutes ?? 180,
-      budget: input.budget ?? 100,
+      budget: undefined, // no budget limit unless user specifies
       preferences: input.preferences ?? [],
       peopleCount: input.peopleCount ?? 1,
       transportMode: input.transportMode ?? "mixed",
@@ -623,9 +663,20 @@ export class CityWalkGraphRunner {
     let minutes = 0;
     const routeBuffer = Math.max(30, Math.round(state.constraints.durationMinutes * 0.25));
 
+    // If user specified an endPoint, ensure it's the last stop
+    if (state.constraints.endPoint) {
+      const epPoi = sorted.find(p => p.name === state.constraints.endPoint);
+      if (epPoi) {
+        // Remove from sorted so it's not picked in the middle
+        const epIndex = sorted.indexOf(epPoi);
+        sorted.splice(epIndex, 1);
+      }
+    }
+
     for (const poi of sorted) {
       const stay = this.estimateStayMinutes(poi.category);
-      if (cost + poi.averageCost > state.constraints.budget) {
+      // Budget check only if user specified a budget
+      if (state.constraints.budget != null && cost + poi.averageCost > state.constraints.budget) {
         continue;
       }
       if (minutes + stay + routeBuffer > state.constraints.durationMinutes) {
@@ -647,6 +698,27 @@ export class CityWalkGraphRunner {
       if (stops.length >= 4) break;
     }
 
+    // Append endPoint as the last stop if specified
+    if (state.constraints.endPoint) {
+      const epPoi = state.candidatePois.find(p => p.name === state.constraints.endPoint);
+      if (epPoi && !stops.some(s => s.name === state.constraints.endPoint)) {
+        const stay = this.estimateStayMinutes(epPoi.category);
+        stops.push({
+          name: epPoi.name,
+          category: epPoi.category,
+          estimatedCost: epPoi.averageCost,
+          estimatedStayMinutes: stay,
+          reason: "用户指定的终点",
+          location: epPoi.location,
+          address: epPoi.address,
+          rating: epPoi.rating,
+          distanceMeters: epPoi.distanceMeters
+        });
+        cost += epPoi.averageCost;
+        minutes += stay;
+      }
+    }
+
     return stops;
   }
 
@@ -655,7 +727,7 @@ export class CityWalkGraphRunner {
     if (state.weatherRisk === "high" && state.selectedStops.some((stop) => ["park", "sight"].includes(stop.category))) {
       violations.push("天气风险较高但路线包含户外点位");
     }
-    if (state.totalEstimatedCost > state.constraints.budget) {
+    if (state.constraints.budget != null && state.totalEstimatedCost > state.constraints.budget) {
       violations.push(`预算超支 ${state.totalEstimatedCost - state.constraints.budget} 元`);
     }
     if (state.totalEstimatedMinutes > state.constraints.durationMinutes) {
@@ -699,7 +771,7 @@ export class CityWalkGraphRunner {
         });
       }
     }
-    if (correction.includes("预算")) {
+    if (correction.includes("预算") && state.constraints.budget != null) {
       stops = stops.sort((left, right) => left.estimatedCost - right.estimatedCost);
       while (stops.reduce((sum, stop) => sum + stop.estimatedCost, 0) > state.constraints.budget) {
         stops.pop();
@@ -722,7 +794,7 @@ export class CityWalkGraphRunner {
 
   private buildFinalAnswer(state: CityWalkGraphState): string {
     if (state.selectedStops.length === 0) {
-      return `从${state.constraints.startPoint}出发暂未找到满足 ${state.constraints.durationMinutes} 分钟和 ${state.constraints.budget} 元预算的路线，建议放宽预算、时间或偏好关键词。`;
+      return `从${state.constraints.startPoint}出发暂未找到满足 ${state.constraints.durationMinutes} 分钟的路线，建议放宽时间或扩展偏好关键词。`;
     }
 
     const stops = state.selectedStops;
@@ -733,10 +805,11 @@ export class CityWalkGraphRunner {
     const routeParts = stops.map((stop, index) => {
       const leg = legs[index];
       const legInfo = leg ? `${modeLabel(leg.mode)}${leg.durationMinutes}分钟` : '';
+      const isEnd = state.constraints.endPoint && stop.name === state.constraints.endPoint;
       if (index === 0) {
-        return `${index + 1}. 从${state.constraints.startPoint}出发，${legInfo}到达 ${stop.name}（停留${stop.estimatedStayMinutes}分钟，约${stop.estimatedCost}元）`;
+        return `${index + 1}. 从${state.constraints.startPoint}出发，${legInfo}到达 ${stop.name}（停留${stop.estimatedStayMinutes}分钟，约${stop.estimatedCost}元）${isEnd ? '【终点】' : ''}`;
       }
-      return `${index + 1}. ${legInfo}到达 ${stop.name}（停留${stop.estimatedStayMinutes}分钟，约${stop.estimatedCost}元）`;
+      return `${index + 1}. ${legInfo}到达 ${stop.name}（停留${stop.estimatedStayMinutes}分钟，约${stop.estimatedCost}元）${isEnd ? '【终点】' : ''}`;
     });
 
     const route = routeParts.join('。');
@@ -752,7 +825,11 @@ export class CityWalkGraphRunner {
           ? "当前方案保留室内备选，适合应对短时降雨。"
           : "天气风险较低，适合常规 CityWalk。";
 
-    return `从${state.constraints.startPoint}出发，推荐 ${stops.length} 个点位：${route}。预计总花费 ${state.totalEstimatedCost} 元，总时长约 ${state.totalEstimatedMinutes} 分钟（路程${timeBreakdown} + 停留${stayTime}分钟）。${weatherNote}`;
+    const costInfo = state.constraints.budget != null
+      ? `预计总花费 ${state.totalEstimatedCost} 元（预算${state.constraints.budget}元），`
+      : `预计总花费约 ${state.totalEstimatedCost} 元，`;
+
+    return `从${state.constraints.startPoint}出发，推荐 ${stops.length} 个点位：${route}。${costInfo}总时长约 ${state.totalEstimatedMinutes} 分钟（路程${timeBreakdown} + 停留${stayTime}分钟）。${weatherNote}`;
   }
 
   private completeStep(steps: AgentPlanStep[], stepId: string): AgentPlanStep[] {
@@ -863,14 +940,28 @@ export class CityWalkGraphRunner {
     return Number(task.match(/(\d+)\s*(?:个人|人)/)?.[1]) || undefined;
   }
 
+  private matchEndPoint(task: string): string | undefined {
+    // "最后一个地点是XX", "终点是XX", "最后到XX", "终点站XX", "结束于XX"
+    return task.match(/(?:最后一个地点|终点|最后到|终点站|结束于)(?:是|在|为)?\s*(.{2,15}?)(?:[。，,\s]|$)/)?.[1]?.trim();
+  }
+
+  private matchMaxLegMinutes(task: string): number | undefined {
+    // "之间.*不超过30分钟", "交通.*30分钟以内", "步行.*30分钟以内", "不超过30分钟"
+    const m = task.match(/(?:之间|交通|步行|每个|各段|每段).{0,8}?(\d+)\s*分钟/);
+    if (m) return Number(m[1]);
+    const m2 = task.match(/(?:不超过|以内|之内)\s*(\d+)\s*分钟/);
+    if (m2) return Number(m2[1]);
+    return undefined;
+  }
+
   private matchPreferences(task: string): string[] {
-    const preferences = ["书店", "咖啡", "博物馆", "美术馆", "展览", "公园", "街区", "商场", "美食", "餐厅"].filter((keyword) =>
-      task.includes(keyword)
-    );
-    return preferences.length > 0 ? preferences : ["书店", "咖啡", "博物馆"];
+    const allPrefs = ["书店", "咖啡", "博物馆", "美术馆", "展览", "公园", "街区", "商场", "美食", "餐厅", "景点", "奶茶", "甜品", "影院"];
+    const matched = allPrefs.filter((keyword) => task.includes(keyword));
+    return matched.length > 0 ? matched : ["书店", "咖啡", "博物馆", "公园", "景点", "美食", "奶茶"];
   }
 
   private describeStructuredInput(input: PlanRequest): string {
-    return `${input.city ?? "南京"} CityWalk：从${input.startPoint ?? "新街口"}出发，${input.durationMinutes ?? 180}分钟，预算${input.budget ?? 100}元，偏好${(input.preferences ?? ["书店", "咖啡"]).join("、")}`;
+    const budgetNote = input.budget != null ? `，预算${input.budget}元` : '';
+    return `${input.city ?? "南京"} CityWalk：从${input.startPoint ?? "新街口"}出发，${input.durationMinutes ?? 180}分钟${budgetNote}，偏好${(input.preferences ?? ["书店", "咖啡"]).join("、")}`;
   }
 }

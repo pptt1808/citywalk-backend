@@ -15,7 +15,9 @@ const PlanRequestSchema = z.object({
   transportMode: z.enum(["walk", "transit", "mixed"]).optional(),
   weatherPreference: z.enum(["avoid_rain", "indoor_first", "outdoor_ok"]).optional(),
   weatherRisk: z.enum(["low", "medium", "high"]).optional(),
-  preferredModel: z.enum(["flash", "pro"]).optional()
+  preferredModel: z.enum(["flash", "pro"]).optional(),
+  endPoint: z.string().min(1).optional(),
+  maxLegMinutes: z.number().int().positive().optional()
 }).refine((data) => data.task || data.startPoint, {
   message: "必须提供 task 自然语言任务，或至少提供 startPoint 结构化起点",
   path: ["task"]

@@ -2,12 +2,14 @@ export interface UserConstraints {
   city: string;
   startPoint: string;
   durationMinutes: number;
-  budget: number;
+  budget?: number;            // undefined = no budget limit
   preferences: string[];
   peopleCount?: number;
   transportMode?: "walk" | "transit" | "mixed";
   weatherPreference?: "avoid_rain" | "indoor_first" | "outdoor_ok";
   weatherRisk?: "low" | "medium" | "high";
+  endPoint?: string;          // user-specified final destination
+  maxLegMinutes?: number;     // max time per leg (walk/transit)
 }
 
 export interface PlanRequest {
@@ -21,6 +23,8 @@ export interface PlanRequest {
   transportMode?: "walk" | "transit" | "mixed";
   weatherPreference?: "avoid_rain" | "indoor_first" | "outdoor_ok";
   weatherRisk?: "low" | "medium" | "high";
+  endPoint?: string;
+  maxLegMinutes?: number;
   /** Frontend model selector: 'flash' = deepseek-v4-flash, 'pro' = deepseek-v4-pro */
   preferredModel?: "flash" | "pro";
 }
