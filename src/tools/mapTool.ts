@@ -1,5 +1,5 @@
 import { env } from "../config/env";
-import { PoiCategory } from "../types/plan";
+import { PoiCategory, RouteLeg } from "../types/plan";
 
 type AmapPoi = {
   name?: string;
@@ -23,14 +23,6 @@ export interface Poi {
   rating?: number;
   distanceMeters?: number;
   indoor?: boolean;
-}
-
-export interface RouteLeg {
-  origin: string;
-  destination: string;
-  distanceMeters: number;
-  durationMinutes: number;
-  mode: "walk" | "transit" | "bicycling";
 }
 
 export interface DistanceMatrixItem {

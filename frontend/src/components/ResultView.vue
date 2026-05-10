@@ -2,6 +2,7 @@
 import { inject, computed } from 'vue'
 import type { useAgentPlan } from '../composables/useAgentPlan'
 import type { PoiCategory } from '../api/agent'
+import RouteMap from './RouteMap.vue'
 
 const agent = inject<ReturnType<typeof useAgentPlan>>('agent')!
 const result = computed(() => agent.result.value!)
@@ -72,6 +73,13 @@ function formatTime(minutes: number): string {
         <span class="stat-label">推荐地点</span>
       </div>
     </div>
+
+    <!-- ── Map view ── -->
+    <RouteMap
+      :stops="result.stops"
+      :routeLegs="result.routeLegs"
+      :startLocation="result.startLocation"
+    />
 
     <!-- ── Route stops ── -->
     <div class="section-title">

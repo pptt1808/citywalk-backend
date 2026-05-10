@@ -21,6 +21,14 @@ export interface RouteStop {
   distanceMeters?: number
 }
 
+export interface RouteLeg {
+  origin: string
+  destination: string
+  distanceMeters: number
+  durationMinutes: number
+  mode: 'walk' | 'transit' | 'bicycling'
+}
+
 export type StateEventType =
   | 'PLAN'
   | 'THINK'
@@ -80,6 +88,8 @@ export interface PlanningResult {
   totalEstimatedCost: number
   totalEstimatedMinutes: number
   stops: RouteStop[]
+  routeLegs?: RouteLeg[]
+  startLocation?: string
   decisionLog: string[]
   planSteps?: AgentPlanStep[]
   events?: StateEvent[]

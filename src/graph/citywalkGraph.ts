@@ -3,13 +3,14 @@ import {
   AgentPlanStep,
   PlanningResult,
   PlanRequest,
+  RouteLeg,
   RouteStop,
   StateEvent,
   TraceStep,
   UserConstraints
 } from "../types/plan";
 import { LlmRouter } from "../llm/llmRouter";
-import { MapTool, Poi, RouteLeg } from "../tools/mapTool";
+import { MapTool, Poi } from "../tools/mapTool";
 import { WeatherContext, WeatherTool } from "../tools/weatherTool";
 
 const CityWalkState = Annotation.Root({
@@ -132,6 +133,8 @@ export class CityWalkGraphRunner {
       totalEstimatedCost: state.totalEstimatedCost,
       totalEstimatedMinutes: state.totalEstimatedMinutes,
       stops: state.selectedStops,
+      routeLegs: state.routeLegs,
+      startLocation: state.startLocation,
       decisionLog: state.decisionLog,
       planSteps: state.planSteps,
       events: state.events,
