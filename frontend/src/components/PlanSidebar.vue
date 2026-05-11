@@ -86,13 +86,13 @@ const progress = computed(() => {
 
 /* Step pill */
 .step-pill {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 4px 10px; border-radius: var(--radius-sm);
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-radius: 8px;
   border: 1px solid var(--border); background: var(--bg);
-  font-size: 12px; color: var(--text-muted);
-  transition: all var(--transition);
+  font-size: 12.5px; color: var(--text-muted);
+  transition: all .25s ease;
 }
-.s-running { border-color: var(--accent-border); background: #fff5f0; color: var(--accent); }
+.s-running { border-color: var(--accent-border); background: #fff5f0; color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
 .s-completed { border-color: #a7f3d0; background: #ecfdf5; color: #065f46; }
 .s-failed { border-color: #fecaca; background: #fff5f5; color: #991b1b; }
 
@@ -113,6 +113,6 @@ const progress = computed(() => {
 .sp-label { font-size: 12px; white-space: nowrap; }
 
 /* Progress bar */
-.progress-bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
-.progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width .4s ease; }
+.progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #f59e0b); border-radius: 2px; transition: width .5s ease; }
 </style>
