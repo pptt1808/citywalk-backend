@@ -55,6 +55,14 @@ const CityWalkState = Annotation.Root({
 type CityWalkGraphState = typeof CityWalkState.State;
 type CityWalkGraphUpdate = typeof CityWalkState.Update;
 
+function haversineKm(lng1: number, lat1: number, lng2: number, lat2: number): number {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 export class CityWalkGraphRunner {
   private readonly llmRouter = new LlmRouter();
 
@@ -466,6 +474,25 @@ export class CityWalkGraphRunner {
     });
 
     let routeLegs = await this.mapTool.planRoute(origin, destinations, state.constraints.transportMode ?? "mixed", state.constraints.city);
+
+    // Fallback: if Amap API returned no routes, use straight-line estimates so the map still shows lines
+    if (routeLegs.length === 0 || routeLegs.every(l => l.distanceMeters === 0)) {
+      const allCoords = [origin, ...destinations].map(c => c?.split(",").map(Number) as [number, number] | undefined).filter(Boolean) as [number, number][];
+      routeLegs = [];
+      for (let i = 0; i < allCoords.length - 1; i++) {
+        const [lng1, lat1] = allCoords[i];
+        const [lng2, lat2] = allCoords[i + 1];
+        const dist = haversineKm(lng1, lat1, lng2, lat2) * 1000;
+        const walkMin = Math.max(1, Math.round(dist / 80)); // ~5 km/h walking
+        routeLegs.push({
+          origin: allCoords[i].join(","),
+          destination: allCoords[i + 1].join(","),
+          distanceMeters: Math.round(dist),
+          durationMinutes: walkMin,
+          mode: dist > 3000 ? "transit" : "walk"
+        });
+      }
+    }
 
     // Enforce maxLegMinutes: if any walk leg exceeds limit, replan with transit
     if (state.constraints.maxLegMinutes) {
