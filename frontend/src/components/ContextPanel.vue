@@ -254,10 +254,12 @@ const timePercent = computed(() => {
 .stop-card {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 10px;
+  border-radius: 10px;
+  padding: 14px;
   animation: fadeSlideIn 0.25s ease both;
+  transition: border-color .15s;
 }
+.stop-card:hover { border-color: var(--accent-border); }
 .stop-header {
   display: flex;
   align-items: flex-start;
@@ -281,8 +283,8 @@ const timePercent = computed(() => {
 .stop-cat-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
 .stop-info { flex: 1; min-width: 0; }
 .stop-name {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 700;
   color: var(--text-h);
   white-space: nowrap;
   overflow: hidden;
@@ -324,24 +326,23 @@ const timePercent = computed(() => {
   color: var(--text-muted);
 }
 .cp-highlight {
-  font-size: 11px; color: var(--accent); line-height: 1.4;
-  margin: 2px 0 0 28px; padding: 3px 6px;
-  background: var(--accent-dim); border-radius: 4px;
+  font-size: 12.5px; color: var(--accent); line-height: 1.5;
+  margin: 4px 0 0 28px; padding: 4px 8px;
+  background: var(--accent-dim); border-radius: 6px; border-left: 2px solid var(--accent);
 }
 .cp-cost {
-  font-size: 11px; color: #854d0e; line-height: 1.4;
-  margin: 3px 0 0 28px;
+  font-size: 12px; color: #854d0e; line-height: 1.5;
+  margin: 4px 0 0 28px; padding: 4px 8px;
+  background: #fefce8; border: 1px solid #fde68a; border-radius: 6px;
 }
 .cp-booking {
-  font-size: 11px; color: #075985; line-height: 1.4;
-  margin: 2px 0 0 28px;
+  font-size: 12px; color: #075985; line-height: 1.5;
+  margin: 4px 0 0 28px; padding: 4px 8px;
+  background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px;
 }
 .stop-reason {
-  font-size: 11px;
-  color: var(--text-muted);
-  line-height: 1.45;
-  margin-top: 6px;
-  margin-left: 28px;
+  font-size: 12px; color: var(--text-muted); line-height: 1.5;
+  margin-top: 6px; margin-left: 28px;
 }
 
 /* Decision log */
