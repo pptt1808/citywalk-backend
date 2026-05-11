@@ -8,6 +8,7 @@ import ResultView from './ResultView.vue'
 
 const agent = inject<ReturnType<typeof useAgentPlan>>('agent')!
 const showDebugJson = inject<Ref<boolean>>('showDebugJson', ref(false))
+const showHistory = inject<Ref<boolean>>('showHistory', ref(false))
 
 type Tab = 'result' | 'events' | 'debug'
 const activeTab = ref<Tab>('events')
@@ -138,14 +139,12 @@ watch(() => agent.status.value, (newVal, oldVal) => {
           </button>
 
           <button
+            v-if="showDebugJson"
             class="tab-btn"
             :class="{ active: activeTab === 'debug' }"
             :disabled="!agent.rawJson.value"
-            @click="activeTab = 'debug'; showDebugJson = true"
+            @click="activeTab = 'debug'"
           >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
-            </svg>
             JSON
           </button>
 
@@ -155,6 +154,15 @@ watch(() => agent.status.value, (newVal, oldVal) => {
             <span class="pill pill-blue">{{ agent.result.value.totalEstimatedMinutes }}分钟</span>
             <span class="pill pill-gray">{{ agent.result.value.stops.length }} 处</span>
           </div>
+
+          <!-- Spacer -->
+          <div style="flex:1" />
+
+          <!-- History toggle -->
+          <button class="tab-btn hist-btn" :class="{ active: showHistory.value }" @click="showHistory = !showHistory" title="历史记录">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            历史
+          </button>
         </div>
 
         <!-- Tab panels (all rendered, toggled by opacity) -->

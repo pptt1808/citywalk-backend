@@ -42,16 +42,6 @@ const showDebugJson = inject<Ref<boolean>>('showDebugJson')!
         <span>{{ agent.backendOnline.value === null ? '检查中' : agent.backendOnline.value ? 'API 在线' : '离线' }}</span>
       </div>
 
-      <button class="hdr-btn" :class="{ active: showHistory }" @click="emit('toggleHistory')">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        历史
-      </button>
-
-      <button class="hdr-btn" :class="{ active: showDebugJson }" @click="showDebugJson = !showDebugJson">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-        JSON
-      </button>
-
       <button class="hdr-btn" :disabled="agent.status.value === 'idle'" @click="agent.reset()">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.36"/></svg>
         重置

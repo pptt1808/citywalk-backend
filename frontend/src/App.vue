@@ -18,7 +18,7 @@ onMounted(() => { agent.checkHealth() })
 </script>
 
 <template>
-  <AppHeader @toggle-history="showHistory = !showHistory" :showHistory="showHistory" />
+  <AppHeader />
   <div class="workspace" :class="{ 'has-history': showHistory }">
     <PlanInput />
     <AgentConsole />
