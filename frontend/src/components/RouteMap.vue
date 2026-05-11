@@ -132,11 +132,11 @@ function renderMap() {
     markers.push(marker)
   })
 
-  // Polylines: walk=orange dashed, transit=blue dashed
-  if (coords.length >= 2 && props.routeLegs?.length) {
-    for (let i = 0; i < props.routeLegs.length && i < coords.length - 1; i++) {
-      const leg = props.routeLegs[i]
-      const isTransit = leg.mode === 'transit'
+  // Polylines between consecutive coordinates
+  if (coords.length >= 2) {
+    for (let i = 0; i < coords.length - 1; i++) {
+      const leg = props.routeLegs?.[i]
+      const isTransit = leg?.mode === 'transit'
       const line = createPolyline({
         path: [coords[i], coords[i + 1]],
         strokeColor: isTransit ? '#0ea5e9' : '#d4570a',
