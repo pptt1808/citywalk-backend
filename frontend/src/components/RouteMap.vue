@@ -215,13 +215,11 @@ onUnmounted(() => {
 watch(() => [props.stops, props.routeLegs, props.startLocation], () => {
   if (mapInstance) {
     renderMap()
+    setTimeout(() => mapInstance?.resize?.(), 150)
   } else if (hasCoordinates.value) {
     initMap()
-    // Retry once after DOM paint in case container wasn't ready
     if (!mapInstance) {
-      requestAnimationFrame(() => {
-        if (!mapInstance && hasCoordinates.value) initMap()
-      })
+      setTimeout(() => { if (!mapInstance && hasCoordinates.value) initMap() }, 250)
     }
   }
 }, { flush: 'post' })
@@ -246,19 +244,18 @@ watch(() => [props.stops, props.routeLegs, props.startLocation], () => {
 <style scoped>
 .route-map-container {
   width: 100%;
-  min-height: 360px;
-  height: 360px;
+  height: 400px;
+  min-height: 400px;
   flex-shrink: 0;
-  border-radius: 10px;
+  border-radius: 12px;
   border: 1px solid var(--border);
   overflow: hidden;
   position: relative;
   margin-bottom: 20px;
 }
 .map-canvas {
-  width: 100%;
-  height: 100%;
-  min-height: 360px;
+  position: absolute;
+  inset: 0;
 }
 .map-placeholder {
   position: absolute;
