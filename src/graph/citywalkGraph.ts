@@ -9,6 +9,7 @@ import {
   TraceStep,
   UserConstraints
 } from "../types/plan";
+import { env } from "../config/env";
 import { LlmRouter } from "../llm/llmRouter";
 import { MapTool, Poi } from "../tools/mapTool";
 import { WeatherContext, WeatherTool } from "../tools/weatherTool";
@@ -845,7 +846,15 @@ export class CityWalkGraphRunner {
 
   private buildFinalAnswer(state: CityWalkGraphState): string {
     if (state.selectedStops.length === 0) {
-      return `从${state.constraints.startPoint}出发暂未找到合适的路线，建议放宽约束或扩展偏好关键词。`;
+      const hasApiKey = !!env.AMAP_KEY;
+      const candidateCount = state.candidatePois.length;
+      const prefList = (state.constraints.preferences ?? []).join("、") || "默认";
+      const diag = !hasApiKey
+        ? "（高德 API Key 未配置，无法搜索真实 POI 数据）"
+        : candidateCount === 0
+          ? `（高德 API 已调用但未返回结果，请检查 Key 权限或网络）`
+          : `（搜索到 ${candidateCount} 个候选点，但均不满足当前约束）`;
+      return `从${state.constraints.startPoint}出发暂未找到合适的路线。搜索偏好：${prefList}。${diag}`;
     }
 
     const stops = state.selectedStops;

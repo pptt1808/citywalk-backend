@@ -174,7 +174,9 @@ export class LlmRouter {
 
   private async completeJson<T>(model: LlmModelConfig, messages: ChatMessage[]): Promise<T> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), env.LLM_TIMEOUT_MS);
+    // Pro model with thinking needs more time
+    const timeoutMs = model.thinking ? Math.max(env.LLM_TIMEOUT_MS, 90000) : env.LLM_TIMEOUT_MS;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(`${model.baseUrl.replace(/\/$/, "")}${this.normalizedChatPath()}`, {
@@ -191,9 +193,11 @@ export class LlmRouter {
         throw new Error(`LLM ${model.provider} HTTP ${response.status}`);
       }
       const payload = (await response.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
+        choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>;
       };
-      const content = payload.choices?.[0]?.message?.content;
+      const msg = payload.choices?.[0]?.message;
+      // Pro model with thinking may return JSON in reasoning_content
+      const content = msg?.content || msg?.reasoning_content;
       if (!content) {
         throw new Error(`LLM ${model.provider} returned empty content`);
       }
@@ -217,19 +221,20 @@ export class LlmRouter {
   }
 
   private buildRequestBody(model: LlmModelConfig, messages: ChatMessage[]) {
-    return {
+    const body: Record<string, unknown> = {
       model: model.model,
       messages,
       temperature: 0.2,
-      response_format: { type: "json_object" },
       stream: false,
-      ...(model.thinking
-        ? {
-            thinking: { type: "enabled" },
-            reasoning_effort: "high"
-          }
-        : {})
     };
+    if (!model.thinking) {
+      body.response_format = { type: "json_object" };
+    }
+    if (model.thinking) {
+      body.thinking = { type: "enabled" };
+      body.reasoning_effort = "medium";
+    }
+    return body;
   }
 
   private normalizedChatPath(): string {
