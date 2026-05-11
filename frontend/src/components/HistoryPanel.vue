@@ -150,7 +150,7 @@ onMounted(loadHistory)
 .spin { animation: spin 1s linear infinite; }
 
 /* Body */
-.hp-body { flex: 1; overflow-y: auto; padding: 8px 0; }
+.hp-body { flex: 1; overflow-y: visible; padding: 6px 0; }
 
 /* Skeleton */
 .hp-skel { display: flex; flex-direction: column; gap: 6px; padding: 8px 14px; }
@@ -170,7 +170,7 @@ onMounted(loadHistory)
 .hp-entry.open { background: var(--accent-dim); }
 
 /* Row */
-.hp-row { padding: 14px 16px; cursor: pointer; transition: background .12s; }
+.hp-row { padding: 10px 14px; cursor: pointer; transition: background .12s; }
 .hp-row:hover { background: var(--surface-hover); }
 .hp-entry.open .hp-row { background: transparent; }
 .hp-row-top { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
@@ -185,7 +185,7 @@ onMounted(loadHistory)
 /* Detail */
 .hp-detail { padding: 0 16px 16px; display: flex; flex-direction: column; gap: 12px; }
 .hp-route { display: flex; flex-direction: column; gap: 3px; }
-.hp-route-stop { display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: var(--bg); border-radius: 8px; font-size: 13px; }
+.hp-route-stop { display: flex; align-items: center; gap: 6px; padding: 5px 8px; background: var(--bg); border-radius: 7px; font-size: 12px; }
 .hp-rs-num { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #fff; flex-shrink: 0; }
 .hp-rs-icon { font-size: 15px; flex-shrink: 0; }
 .hp-rs-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-h); }
