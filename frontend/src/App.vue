@@ -10,19 +10,16 @@ const agent = useAgentPlan()
 const showDebugJson = ref(false)
 const showHistory = ref(false)
 
-// Provide shared state to all children via injection
 provide('agent', agent)
 provide('showDebugJson', showDebugJson)
 provide('showHistory', showHistory)
 
-onMounted(() => {
-  agent.checkHealth()
-})
+onMounted(() => { agent.checkHealth() })
 </script>
 
 <template>
   <AppHeader @toggle-history="showHistory = !showHistory" :showHistory="showHistory" />
-  <div class="workspace">
+  <div class="workspace" :class="{ 'has-history': showHistory }">
     <PlanInput />
     <AgentConsole />
     <HistoryPanel v-if="showHistory" />
@@ -36,18 +33,12 @@ onMounted(() => {
   grid-template-columns: 320px 1fr;
   overflow: hidden;
 }
-.workspace:has(.history-panel) {
-  grid-template-columns: 320px 1fr 280px;
+.workspace.has-history {
+  grid-template-columns: 320px 1fr 300px;
 }
 
 @media (max-width: 768px) {
-  .workspace {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
-    overflow-y: auto;
-  }
-  .workspace:has(.history-panel) {
-    grid-template-columns: 1fr;
-  }
+  .workspace { grid-template-columns: 1fr; grid-template-rows: auto 1fr; overflow-y: auto; }
+  .workspace.has-history { grid-template-columns: 1fr; }
 }
 </style>
