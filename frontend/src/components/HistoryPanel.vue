@@ -138,7 +138,7 @@ onMounted(loadHistory)
 </template>
 
 <style scoped>
-.hp { display: flex; flex-direction: column; width: 340px; flex-shrink: 0; background: var(--surface); border-left: 1px solid var(--border); overflow: hidden; }
+.hp { display: flex; flex-direction: column; width: 100%; flex-shrink: 0; background: var(--surface); border-left: 1px solid var(--border); overflow: hidden; }
 
 /* Header */
 .hp-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0; }

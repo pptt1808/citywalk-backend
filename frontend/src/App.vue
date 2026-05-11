@@ -30,15 +30,22 @@ onMounted(() => { agent.checkHealth() })
 .workspace {
   flex: 1;
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: 280px 1fr;
   overflow: hidden;
 }
 .workspace.has-history {
-  grid-template-columns: 320px 1fr 300px;
+  grid-template-columns: 280px 1fr 280px;
 }
 
-@media (max-width: 768px) {
-  .workspace { grid-template-columns: 1fr; grid-template-rows: auto 1fr; overflow-y: auto; }
+@media (max-width: 1200px) {
+  .workspace.has-history { grid-template-columns: 260px 1fr 260px; }
+}
+@media (max-width: 900px) {
+  .workspace { grid-template-columns: 240px 1fr; }
   .workspace.has-history { grid-template-columns: 1fr; }
+  .workspace.has-history .hp { display: none; }
+}
+@media (max-width: 640px) {
+  .workspace { grid-template-columns: 1fr; grid-template-rows: auto 1fr; overflow-y: auto; }
 }
 </style>
