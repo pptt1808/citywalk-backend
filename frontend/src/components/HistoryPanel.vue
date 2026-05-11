@@ -150,7 +150,8 @@ onMounted(loadHistory)
 .spin { animation: spin 1s linear infinite; }
 
 /* Body */
-.hp-body { flex: 1; overflow-y: visible; padding: 6px 0; }
+.hp-body { flex: 1; overflow-y: auto; padding: 6px 0; scrollbar-width: none; }
+.hp-body::-webkit-scrollbar { display: none; }
 
 /* Skeleton */
 .hp-skel { display: flex; flex-direction: column; gap: 6px; padding: 8px 14px; }
