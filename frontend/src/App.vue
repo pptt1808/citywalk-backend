@@ -30,15 +30,15 @@ onMounted(() => { agent.checkHealth() })
 .workspace {
   flex: 1;
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 320px 1fr;
   overflow: hidden;
 }
 .workspace.has-history {
-  grid-template-columns: 280px 1fr 280px;
+  grid-template-columns: 320px 1fr 290px;
 }
 
 @media (max-width: 1200px) {
-  .workspace.has-history { grid-template-columns: 260px 1fr 260px; }
+  .workspace.has-history { grid-template-columns: 300px 1fr 280px; }
 }
 @media (max-width: 900px) {
   .workspace { grid-template-columns: 240px 1fr; }

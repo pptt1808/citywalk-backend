@@ -158,11 +158,6 @@ watch(() => agent.status.value, (newVal, oldVal) => {
           <!-- Spacer -->
           <div style="flex:1" />
 
-          <!-- History toggle -->
-          <button class="tab-btn hist-btn" :class="{ active: showHistory.value }" @click="showHistory = !showHistory" title="历史记录">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-            历史
-          </button>
         </div>
 
         <!-- Tab panels (all rendered, toggled by opacity) -->
@@ -287,6 +282,15 @@ watch(() => agent.status.value, (newVal, oldVal) => {
 .pill-green { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
 .pill-blue  { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
 .pill-gray  { background: var(--surface-2); color: var(--text-muted); border-color: var(--border); }
+
+.hist-toggle {
+  margin-left: 4px;
+  padding: 6px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  font-weight: 500;
+}
+.hist-toggle.active { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
 
 /* Tab panels — crossfade via opacity */
 .tab-panels {

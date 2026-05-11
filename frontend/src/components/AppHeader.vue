@@ -1,13 +1,11 @@
 <script setup lang="ts">
-import { inject } from 'vue'
+import { inject, ref } from 'vue'
 import type { Ref } from 'vue'
 import type { useAgentPlan } from '../composables/useAgentPlan'
 
-defineProps<{ showHistory?: boolean }>()
-const emit = defineEmits<{ 'toggleHistory': [] }>()
-
 const agent = inject<ReturnType<typeof useAgentPlan>>('agent')!
 const showDebugJson = inject<Ref<boolean>>('showDebugJson')!
+const showHistory = inject<Ref<boolean>>('showHistory', ref(false))
 </script>
 
 <template>
@@ -41,6 +39,11 @@ const showDebugJson = inject<Ref<boolean>>('showDebugJson')!
         <span class="status-dot" :class="agent.backendOnline.value === true ? 'dot-on' : agent.backendOnline.value === false ? 'dot-off' : 'dot-chk'" />
         <span>{{ agent.backendOnline.value === null ? '检查中' : agent.backendOnline.value ? 'API 在线' : '离线' }}</span>
       </div>
+
+      <button class="hdr-btn" :class="{ active: showHistory.value }" @click="showHistory = !showHistory" title="历史记录">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        历史
+      </button>
 
       <button class="hdr-btn" :disabled="agent.status.value === 'idle'" @click="agent.reset()">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.36"/></svg>
