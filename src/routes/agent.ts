@@ -4,9 +4,10 @@ import {
   createAgentTraceStreamGetHandler,
   createAgentTraceStreamPostHandler
 } from "../controllers/planController";
+import { asyncHandler } from "../middleware/http";
 
 export const agentRouter = Router();
 
-agentRouter.post("/trace", createAgentTraceHandler);
-agentRouter.get("/trace/stream", createAgentTraceStreamGetHandler);
-agentRouter.post("/trace/stream", createAgentTraceStreamPostHandler);
+agentRouter.post("/trace", asyncHandler(createAgentTraceHandler));
+agentRouter.get("/trace/stream", asyncHandler(createAgentTraceStreamGetHandler));
+agentRouter.post("/trace/stream", asyncHandler(createAgentTraceStreamPostHandler));

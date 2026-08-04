@@ -3,21 +3,76 @@ import { z } from "zod";
 import { plannerService } from "../services/plannerService";
 import { PlanRequest } from "../types/plan";
 import { compactStateEventsForWire } from "../utils/stateEventWire";
+import { env } from "../config/env";
+import { isAbortError } from "../utils/httpClient";
+import { authUserId } from "../middleware/auth";
+
+const PartySchema = z.object({
+  total: z.number().int().min(1).max(50).optional(),
+  adults: z.number().int().min(0).max(50).optional(),
+  children: z.number().int().min(0).max(20).optional(),
+  childAges: z.array(z.number().int().min(0).max(17)).max(20).optional(),
+  seniors: z.number().int().min(0).max(20).optional(),
+  stroller: z.boolean().optional(),
+  mobilityNeeds: z.array(z.string().min(1).max(80)).max(20).optional()
+});
+
+const ExperienceSchema = z.object({
+  familyFriendly: z.boolean().optional(),
+  pace: z.enum(["relaxed", "normal", "intensive"]).optional(),
+  restStopRequired: z.boolean().optional(),
+  restroomPreferred: z.boolean().optional(),
+  avoidCrowds: z.boolean().optional()
+});
+
+const AccessibilitySchema = z.object({
+  wheelchairAccessRequired: z.boolean().optional(),
+  stepFreeRequired: z.boolean().optional(),
+  elevatorRequired: z.boolean().optional(),
+  accessibleRestroomRequired: z.boolean().optional(),
+  frequentRestRequired: z.boolean().optional()
+});
+
+const StyleSchema = z.object({
+  rawText: z.string().min(1).max(500).optional(),
+  summary: z.string().min(1).max(240).optional(),
+  tags: z.array(z.object({
+    name: z.string().min(1).max(60),
+    weight: z.number().min(0).max(1).optional(),
+    evidence: z.string().max(120).optional()
+  })).max(16).optional(),
+  desiredScenes: z.array(z.object({
+    description: z.string().min(1).max(120),
+    importance: z.number().min(0).max(1).optional(),
+    searchHints: z.array(z.string().min(1).max(60)).max(6).optional()
+  })).max(10).optional(),
+  avoidances: z.array(z.string().min(1).max(100)).max(12).optional(),
+  searchHints: z.array(z.string().min(1).max(60)).max(16).optional(),
+  narrativeArc: z.array(z.string().min(1).max(100)).max(10).optional(),
+  confidence: z.number().min(0).max(1).optional()
+}).optional();
 
 const PlanRequestSchema = z.object({
-  task: z.string().min(1).optional(),
-  city: z.string().min(1).optional(),
-  startPoint: z.string().min(1).optional(),
-  durationMinutes: z.number().int().positive().optional(),
-  budget: z.number().positive().optional(),
-  preferences: z.array(z.string()).default([]),
-  peopleCount: z.number().int().positive().optional(),
+  task: z.string().trim().min(1).max(2000).optional(),
+  city: z.string().trim().min(1).max(100).optional(),
+  startPoint: z.string().trim().min(1).max(300).optional(),
+  durationMinutes: z.number().int().positive().max(1440).optional(),
+  budget: z.number().positive().max(1_000_000).optional(),
+  preferences: z.array(z.string().trim().min(1).max(100)).max(30).default([]),
+  peopleCount: z.number().int().positive().max(50).optional(),
+  party: PartySchema.optional(),
+  experience: ExperienceSchema.optional(),
+  accessibility: AccessibilitySchema.optional(),
+  style: StyleSchema,
+  styleDescription: z.string().min(1).max(500).optional(),
   transportMode: z.enum(["walk", "transit", "mixed"]).optional(),
   weatherPreference: z.enum(["avoid_rain", "indoor_first", "outdoor_ok"]).optional(),
   weatherRisk: z.enum(["low", "medium", "high"]).optional(),
   preferredModel: z.enum(["flash", "pro"]).optional(),
-  endPoint: z.string().min(1).optional(),
-  maxLegMinutes: z.number().int().positive().optional()
+  endPoint: z.string().trim().min(1).max(300).optional(),
+  maxLegMinutes: z.number().int().positive().max(600).optional(),
+  userId: z.string().trim().min(1).max(128).regex(/^[a-zA-Z0-9._:-]+$/).optional(),
+  threadId: z.string().trim().min(1).max(128).regex(/^[a-zA-Z0-9._:-]+$/).optional()
 }).refine((data) => data.task || data.startPoint, {
   message: "必须提供 task 自然语言任务，或至少提供 startPoint 结构化起点",
   path: ["task"]
@@ -40,6 +95,45 @@ function planRequestFromQuery(query: Request["query"]): PlanRequest {
   const weatherPref = firstQuery(query.weatherPreference) as PlanRequest["weatherPreference"] | undefined;
   const weatherR = firstQuery(query.weatherRisk) as PlanRequest["weatherRisk"] | undefined;
   const model = firstQuery(query.preferredModel) as PlanRequest["preferredModel"] | undefined;
+  const bool = (key: string) => {
+    const value = firstQuery(query[key]);
+    return value === "true" ? true : value === "false" ? false : undefined;
+  };
+  const childAges = firstQuery(query.childAges)
+    ?.split(/[,，]/)
+    .map(Number)
+    .filter((age) => Number.isInteger(age) && age >= 0 && age <= 17);
+  const mobilityNeeds = firstQuery(query.mobilityNeeds)
+    ?.split(/[,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const party: NonNullable<PlanRequest["party"]> = {
+    total: n("partyTotal"),
+    adults: n("adults"),
+    children: n("children"),
+    childAges,
+    seniors: n("seniors"),
+    stroller: bool("stroller"),
+    mobilityNeeds
+  };
+  const experience: NonNullable<PlanRequest["experience"]> = {
+    familyFriendly: bool("familyFriendly"),
+    pace: firstQuery(query.pace) as NonNullable<PlanRequest["experience"]>["pace"],
+    restStopRequired: bool("restStopRequired"),
+    restroomPreferred: bool("restroomPreferred"),
+    avoidCrowds: bool("avoidCrowds")
+  };
+  const accessibility: NonNullable<PlanRequest["accessibility"]> = {
+    wheelchairAccessRequired: bool("wheelchairAccessRequired"),
+    stepFreeRequired: bool("stepFreeRequired"),
+    elevatorRequired: bool("elevatorRequired"),
+    accessibleRestroomRequired: bool("accessibleRestroomRequired"),
+    frequentRestRequired: bool("frequentRestRequired")
+  };
+  const styleDescription = firstQuery(query.styleDescription);
+  const hasParty = Object.values(party).some((value) => value !== undefined);
+  const hasExperience = Object.values(experience).some((value) => value !== undefined);
+  const hasAccessibility = Object.values(accessibility).some((value) => value !== undefined);
   return {
     task: firstQuery(query.task),
     city: firstQuery(query.city),
@@ -48,11 +142,23 @@ function planRequestFromQuery(query: Request["query"]): PlanRequest {
     budget: n("budget"),
     preferences: prefsRaw ? prefsRaw.split(/[,，]/).map((s) => s.trim()).filter(Boolean) : undefined,
     peopleCount: n("peopleCount") !== undefined ? Math.floor(n("peopleCount")!) : undefined,
+    party: hasParty ? party : undefined,
+    experience: hasExperience ? experience : undefined,
+    accessibility: hasAccessibility ? accessibility : undefined,
+    styleDescription,
     transportMode: transport,
     weatherPreference: weatherPref,
     weatherRisk: weatherR,
-    preferredModel: model
+    preferredModel: model,
+    endPoint: firstQuery(query.endPoint),
+    maxLegMinutes: n("maxLegMinutes") !== undefined ? Math.floor(n("maxLegMinutes")!) : undefined,
+    userId: firstQuery(query.userId),
+    threadId: firstQuery(query.threadId)
   };
+}
+
+function authenticatedPlanRequest(req: Request, value: PlanRequest): PlanRequest {
+  return { ...value, userId: authUserId(req) };
 }
 
 function initSse(res: Response) {
@@ -63,11 +169,56 @@ function initSse(res: Response) {
   res.setHeader("X-Accel-Buffering", "no");
   const resAny = res as Response & { flushHeaders?: () => void };
   resAny.flushHeaders?.();
+  res.write("retry: 3000\n\n");
 }
 
-function sseWrite(res: Response, event: string, data: unknown) {
+function sseWrite(res: Response, event: string, data: unknown): boolean {
+  if (res.writableEnded || res.destroyed) return false;
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
+  return true;
+}
+
+function requestLifecycle(req: Request, res: Response, heartbeat = false) {
+  const controller = new AbortController();
+  const abortClient = () => {
+    if (!res.writableEnded && !controller.signal.aborted) controller.abort(new Error("Client disconnected"));
+  };
+  req.once("aborted", abortClient);
+  res.once("close", abortClient);
+  const requestTimeout = setTimeout(() => {
+    if (!controller.signal.aborted) controller.abort(new Error("Agent request timed out"));
+  }, env.AGENT_REQUEST_TIMEOUT_MS);
+  requestTimeout.unref?.();
+  const heartbeatTimer = heartbeat ? setInterval(() => {
+    if (!res.writableEnded && !res.destroyed) res.write(`: heartbeat ${Date.now()}\n\n`);
+  }, env.SSE_HEARTBEAT_MS) : undefined;
+  heartbeatTimer?.unref?.();
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(requestTimeout);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      req.removeListener("aborted", abortClient);
+      res.removeListener("close", abortClient);
+    }
+  };
+}
+
+function endSseWithError(req: Request, res: Response, error: unknown): void {
+  const requestId = String(res.locals.requestId ?? "unknown");
+  if (!isAbortError(error) || !res.destroyed) {
+    console.error(`[${requestId}] ${req.method} ${req.originalUrl} SSE failed`, error);
+  }
+  if (!res.writableEnded && !res.destroyed) {
+    sseWrite(res, "stream_error", {
+      message: error instanceof Error && /timed out/i.test(error.message)
+        ? "Agent 规划超时，请缩小任务范围后重试"
+        : "Agent 规划过程中发生错误",
+      requestId
+    });
+    res.end();
+  }
 }
 
 export async function createPlanHandler(req: Request, res: Response) {
@@ -80,8 +231,13 @@ export async function createPlanHandler(req: Request, res: Response) {
     });
   }
 
-  const result = await plannerService.createPlan(parsed.data);
-  return res.status(200).json(result);
+  const lifecycle = requestLifecycle(req, res);
+  try {
+    const result = await plannerService.createPlan(authenticatedPlanRequest(req, parsed.data), lifecycle.signal);
+    return res.status(200).json(result);
+  } finally {
+    lifecycle.cleanup();
+  }
 }
 
 export async function createAgentTraceHandler(req: Request, res: Response) {
@@ -94,8 +250,13 @@ export async function createAgentTraceHandler(req: Request, res: Response) {
     });
   }
 
-  const result = await plannerService.createTrace(parsed.data);
-  return res.status(200).json(result);
+  const lifecycle = requestLifecycle(req, res);
+  try {
+    const result = await plannerService.createTrace(authenticatedPlanRequest(req, parsed.data), lifecycle.signal);
+    return res.status(200).json(result);
+  } finally {
+    lifecycle.cleanup();
+  }
 }
 
 /** POST body 与 `/plan` 相同，响应为 SSE：`state` 事件推送 StateEvent 批次，`done` 含完整 PlanningResult。 */
@@ -108,15 +269,17 @@ export async function createAgentTraceStreamPostHandler(req: Request, res: Respo
     });
   }
   initSse(res);
+  const lifecycle = requestLifecycle(req, res, true);
   try {
-    const result = await plannerService.streamPlanWithStateEvents(parsed.data, (events) => {
+    const result = await plannerService.streamPlanWithStateEvents(authenticatedPlanRequest(req, parsed.data), (events) => {
       sseWrite(res, "state", { events: compactStateEventsForWire(events) });
-    });
+    }, lifecycle.signal);
     sseWrite(res, "done", { result });
     res.end();
-  } catch (err) {
-    sseWrite(res, "stream_error", { message: err instanceof Error ? err.message : String(err) });
-    res.end();
+  } catch (error) {
+    endSseWithError(req, res, error);
+  } finally {
+    lifecycle.cleanup();
   }
 }
 
@@ -133,14 +296,16 @@ export async function createAgentTraceStreamGetHandler(req: Request, res: Respon
     });
   }
   initSse(res);
+  const lifecycle = requestLifecycle(req, res, true);
   try {
-    const result = await plannerService.streamPlanWithStateEvents(parsed.data, (events) => {
+    const result = await plannerService.streamPlanWithStateEvents(authenticatedPlanRequest(req, parsed.data), (events) => {
       sseWrite(res, "state", { events: compactStateEventsForWire(events) });
-    });
+    }, lifecycle.signal);
     sseWrite(res, "done", { result });
     res.end();
-  } catch (err) {
-    sseWrite(res, "stream_error", { message: err instanceof Error ? err.message : String(err) });
-    res.end();
+  } catch (error) {
+    endSseWithError(req, res, error);
+  } finally {
+    lifecycle.cleanup();
   }
 }

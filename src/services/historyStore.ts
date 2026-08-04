@@ -9,7 +9,7 @@ export interface HistoryEntry {
   result: PlanningResult;
 }
 
-const MAX_ENTRIES = 50;
+const MAX_ENTRIES_PER_USER = 50;
 const HISTORY_DIR = path.resolve(process.cwd(), "data");
 const HISTORY_FILE = path.join(HISTORY_DIR, "history.json");
 
@@ -23,7 +23,14 @@ function readAll(): HistoryEntry[] {
   ensureDir();
   try {
     const raw = fs.readFileSync(HISTORY_FILE, "utf-8");
-    return JSON.parse(raw) as HistoryEntry[];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is HistoryEntry => Boolean(entry?.id && entry?.request && entry?.result))
+      .map((entry) => {
+        // Older records predate the server-owned history identity.
+        if (!entry.result.historyId) entry.result.historyId = entry.id;
+        return entry;
+      });
   } catch {
     return [];
   }
@@ -31,7 +38,9 @@ function readAll(): HistoryEntry[] {
 
 function writeAll(entries: HistoryEntry[]): void {
   ensureDir();
-  fs.writeFileSync(HISTORY_FILE, JSON.stringify(entries, null, 2), "utf-8");
+  const temporary = `${HISTORY_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(entries, null, 2), "utf-8");
+  fs.renameSync(temporary, HISTORY_FILE);
 }
 
 function generateId(): string {
@@ -47,32 +56,60 @@ export const historyStore = {
       request,
       result
     };
+    entry.result.historyId = entry.id;
+    if (!request.userId) return entry;
     entries.unshift(entry);
-    if (entries.length > MAX_ENTRIES) {
-      entries.length = MAX_ENTRIES;
+    const userEntries = entries.filter((item) => item.request.userId === request.userId);
+    const overflow = userEntries.slice(MAX_ENTRIES_PER_USER);
+    if (overflow.length) {
+      const removeIds = new Set(overflow.map((item) => item.id));
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        if (removeIds.has(entries[index].id)) entries.splice(index, 1);
+      }
     }
     writeAll(entries);
     return entry;
   },
 
-  list(limit = 20, offset = 0): { entries: HistoryEntry[]; total: number } {
-    const entries = readAll();
+  list(userId: string, limit = 20, offset = 0): { entries: HistoryEntry[]; total: number } {
+    const entries = readAll().filter((entry) => entry.request.userId === userId);
     return {
       entries: entries.slice(offset, offset + limit),
       total: entries.length
     };
   },
 
-  getById(id: string): HistoryEntry | undefined {
-    return readAll().find((e) => e.id === id);
+  getById(id: string, userId: string): HistoryEntry | undefined {
+    return readAll().find((e) => e.id === id && e.request.userId === userId);
   },
 
-  deleteById(id: string): boolean {
+  latestRoute(userId?: string, threadId?: string): HistoryEntry | undefined {
+    // A thread id is only meaningful inside an authenticated/user scope.
+    if (!userId) return undefined;
+    return readAll().find((entry) => {
+      const sameUser = userId ? entry.request.userId === userId : true;
+      const sameThread = threadId ? entry.request.threadId === threadId : true;
+      const isRoute = entry.result.responseKind
+        ? entry.result.responseKind === "route"
+        : entry.result.stops.length > 0;
+      return sameUser && sameThread && isRoute;
+    });
+  },
+
+  deleteById(id: string, userId: string): boolean {
     const entries = readAll();
-    const idx = entries.findIndex((e) => e.id === id);
+    const idx = entries.findIndex((e) => e.id === id && e.request.userId === userId);
     if (idx === -1) return false;
     entries.splice(idx, 1);
     writeAll(entries);
     return true;
+  },
+
+  clear(userId: string): number {
+    const entries = readAll();
+    const kept = entries.filter((entry) => entry.request.userId !== userId);
+    const cleared = entries.length - kept.length;
+    if (cleared) writeAll(kept);
+    return cleared;
   }
 };

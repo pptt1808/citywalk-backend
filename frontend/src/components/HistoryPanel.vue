@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { ref, inject, onMounted } from 'vue'
 import type { useAgentPlan } from '../composables/useAgentPlan'
-import { apiListHistory, apiDeleteHistory, type HistoryEntry } from '../api/agent'
+import {
+  apiListHistory, apiDeleteHistory, apiListFavoriteRoutes, apiUnfavoriteRoute,
+  type PlanRequest, type PlanningResult
+} from '../api/agent'
 import { CAT_ICON } from '../constants'
+import { getMemoryUserId } from '../utils/identity'
 
 const agent = inject<ReturnType<typeof useAgentPlan>>('agent')!
 
@@ -11,27 +15,38 @@ function catColor(cat: string): string {
     bookstore: '#6366f1', cafe: '#a855f7', museum: '#0ea5e9',
     sight: '#f59e0b', mall: '#ec4899', park: '#10b981', restaurant: '#ef4444'
   }
-  return map[cat] ?? '#d4570a'
+  return map[cat] ?? '#974400'
 }
-const entries = ref<HistoryEntry[]>([])
+type PanelEntry = { id: string; createdAt: string; request?: PlanRequest; result: PlanningResult }
+const entries = ref<PanelEntry[]>([])
+const mode = ref<'history' | 'favorites'>('history')
+const favoriteUserId = getMemoryUserId()
 const loading = ref(false)
+const panelError = ref<string | null>(null)
 const expandedId = ref<string | null>(null)
 
-async function loadHistory() {
+async function loadEntries() {
   loading.value = true
-  try { entries.value = (await apiListHistory(20, 0)).entries } catch {} finally { loading.value = false }
+  panelError.value = null
+  try {
+    entries.value = mode.value === 'history'
+      ? (await apiListHistory(favoriteUserId, 20, 0)).entries
+      : favoriteUserId ? (await apiListFavoriteRoutes(favoriteUserId)).entries : []
+  } catch (error) {
+    panelError.value = error instanceof Error ? error.message : '加载失败，请稍后重试'
+  } finally { loading.value = false }
 }
 async function removeEntry(id: string) {
-  try { await apiDeleteHistory(id); entries.value = entries.value.filter(e => e.id !== id) } catch {}
+  panelError.value = null
+  try {
+    if (mode.value === 'history') await apiDeleteHistory(id, favoriteUserId)
+    else await apiUnfavoriteRoute(id, favoriteUserId)
+    entries.value = entries.value.filter(e => e.id !== id)
+  } catch (error) { panelError.value = error instanceof Error ? error.message : '操作失败，请稍后重试' }
 }
-function reuseEntry(entry: HistoryEntry) { agent.reset(); setTimeout(() => agent.run(entry.request), 100) }
-function viewEntry(entry: HistoryEntry) {
-  agent.result.value = entry.result
-  agent.visibleEvents.value = entry.result.events ?? []
-  agent.visibleSteps.value = entry.result.planSteps ?? []
-  agent.rawJson.value = JSON.stringify(entry.result, null, 2)
-  agent.status.value = 'streaming'
-  setTimeout(() => { agent.status.value = 'done' }, 150)
+function reuseEntry(entry: PanelEntry) { if (entry.request) void agent.run(entry.request) }
+function viewEntry(entry: PanelEntry) {
+  agent.loadResult(entry.result, entry.request)
 }
 
 function relativeTime(iso: string): string {
@@ -47,11 +62,17 @@ function relativeTime(iso: string): string {
   return `${d.getMonth() + 1}/${d.getDate()}`
 }
 
-function routePreview(entry: HistoryEntry): string {
+function routePreview(entry: PanelEntry): string {
   return entry.result.stops.map(s => s.name).join(' → ')
 }
 
-onMounted(loadHistory)
+function switchMode(next: 'history' | 'favorites') {
+  mode.value = next
+  expandedId.value = null
+  void loadEntries()
+}
+
+onMounted(loadEntries)
 </script>
 
 <template>
@@ -60,12 +81,14 @@ onMounted(loadHistory)
     <div class="hp-head">
       <div class="hp-head-left">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        <span class="hp-head-title">历史记录</span>
+        <button class="hp-mode" :class="{ active: mode === 'history' }" @click="switchMode('history')">历史</button>
+        <button class="hp-mode" :class="{ active: mode === 'favorites' }" @click="switchMode('favorites')">收藏</button>
       </div>
-      <button class="hp-head-btn" @click="loadHistory" :disabled="loading" title="刷新">
+      <button class="hp-head-btn" @click="loadEntries" :disabled="loading" title="刷新">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" :class="{ spin: loading }"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
       </button>
     </div>
+    <div v-if="panelError" class="hp-error">{{ panelError }}</div>
 
     <!-- Body -->
     <div class="hp-body">
@@ -81,8 +104,8 @@ onMounted(loadHistory)
         <div class="hp-empty-icon">
           <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
         </div>
-        <span class="hp-empty-title">暂无记录</span>
-        <span class="hp-empty-sub">完成一次路线规划后<br/>自动保存到此处</span>
+        <span class="hp-empty-title">{{ mode === 'history' ? '暂无记录' : '暂无收藏路线' }}</span>
+        <span class="hp-empty-sub">{{ mode === 'history' ? '完成一次 Agent 请求后自动保存到此处' : '在路线结果页点击“收藏路线”即可保存' }}</span>
       </div>
 
       <!-- List -->
@@ -94,7 +117,7 @@ onMounted(loadHistory)
               <span class="hp-time">{{ relativeTime(entry.createdAt) }}</span>
               <span class="hp-time-full">{{ new Date(entry.createdAt).toLocaleDateString('zh-CN', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) }}</span>
             </div>
-            <p class="hp-task">{{ entry.request.task || routePreview(entry) }}</p>
+            <p class="hp-task">{{ entry.request?.task || entry.result.title || routePreview(entry) }}</p>
             <div class="hp-row-bottom">
               <div class="hp-route-dots">
                 <span v-for="(s, i) in entry.result.stops.slice(0, 5)" :key="i" class="hp-dot" :style="{ background: catColor(s.category) }" :title="s.name" />
@@ -120,13 +143,13 @@ onMounted(loadHistory)
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                   查看
                 </button>
-                <button class="hp-act hp-act-retry" @click="reuseEntry(entry)">
+                <button v-if="entry.request" class="hp-act hp-act-retry" @click="reuseEntry(entry)">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.36"/></svg>
                   重试
                 </button>
                 <button class="hp-act hp-act-del" @click="removeEntry(entry.id)">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                  删除
+                  {{ mode === 'favorites' ? '取消收藏' : '删除' }}
                 </button>
               </div>
             </div>
@@ -144,9 +167,12 @@ onMounted(loadHistory)
 .hp-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .hp-head-left { display: flex; align-items: center; gap: 8px; color: var(--text-muted); }
 .hp-head-title { font-size: 14px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; }
+.hp-mode { border: 0; background: transparent; color: var(--text-muted); font: inherit; font-size: 13px; font-weight: 650; padding: 5px 8px; border-radius: 7px; cursor: pointer; }
+.hp-mode.active { color: var(--accent); background: var(--accent-dim); }
 .hp-head-btn { background: none; border: none; cursor: pointer; padding: 6px; border-radius: 6px; color: var(--text-muted); transition: all .15s; display: flex; }
 .hp-head-btn:hover:not(:disabled) { color: var(--text-h); background: var(--surface-hover); }
 .hp-head-btn:disabled { opacity: .3; }
+.hp-error { margin: 8px 14px 0; padding: 8px 10px; border-radius: 8px; color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; font-size: 12px; line-height: 1.5; }
 .spin { animation: spin 1s linear infinite; }
 
 /* Body */

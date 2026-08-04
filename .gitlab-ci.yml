@@ -14,6 +14,11 @@ build-backend:
     - npm config set registry https://registry.npmmirror.com
     - npm install
     - npm run build
+    - npm run typecheck
+    - npm run test:constraints
+    - npm run test:style
+    - npm run test:memory
+    - npm run test:intents
   cache:
     key: agent-backend-node
     paths:
@@ -37,7 +42,7 @@ build-frontend:
     - npm install
     - chmod +x ./node_modules/.bin/vue-tsc ./node_modules/.bin/vite
     - ./node_modules/.bin/vue-tsc --noEmit
-    - VITE_AMAP_KEY=${VITE_AMAP_KEY:-} VITE_AMAP_SECURITY=${VITE_AMAP_SECURITY:-} ./node_modules/.bin/vite build
+    - VITE_API_BASE=${VITE_API_BASE:-} VITE_AMAP_KEY=${VITE_AMAP_KEY:-} VITE_AMAP_SECURITY=${VITE_AMAP_SECURITY:-} ./node_modules/.bin/vite build
   cache:
     key: agent-frontend-node
     paths:
@@ -58,17 +63,21 @@ deploy:
     - build-backend
     - build-frontend
   script:
-    - mkdir -p /var/www/citywalk /opt/citywalk
+    - mkdir -p /var/www/citywalk /opt/citywalk /opt/citywalk/data
     - cp -r frontend/dist/* /var/www/citywalk/
     - cp -r dist /opt/citywalk/
     - cp package.json /opt/citywalk/
     # 从 CI/CD Variables 生成 .env 文件
     - |
-      cat > /opt/citywalk/.env << 'ENVEOF'
+      cat > /opt/citywalk/.env << ENVEOF
       PORT=3000
       NODE_ENV=production
       AMAP_KEY=${AMAP_KEY}
       QWEATHER_KEY=${QWEATHER_KEY}
+      QWEATHER_API_HOST=${QWEATHER_API_HOST}
+      TAVILY_API_KEY=${TAVILY_API_KEY}
+      TAVILY_BASE_URL=${TAVILY_BASE_URL:-https://api.tavily.com}
+      TAVILY_SEARCH_TIMEOUT_MS=${TAVILY_SEARCH_TIMEOUT_MS:-15000}
       DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       DEEPSEEK_FLASH_API_KEY=${DEEPSEEK_FLASH_API_KEY}
       DEEPSEEK_FLASH_BASE_URL=https://api.deepseek.com
@@ -79,11 +88,36 @@ deploy:
       DEEPSEEK_CHAT_COMPLETIONS_PATH=/chat/completions
       LLM_ADVANCED_RATIO=0.2
       LLM_TIMEOUT_MS=30000
+      EXTERNAL_API_TIMEOUT_MS=${EXTERNAL_API_TIMEOUT_MS:-12000}
+      AGENT_REQUEST_TIMEOUT_MS=${AGENT_REQUEST_TIMEOUT_MS:-150000}
+      SSE_HEARTBEAT_MS=${SSE_HEARTBEAT_MS:-12000}
+      MAP_SEARCH_CONCURRENCY=${MAP_SEARCH_CONCURRENCY:-4}
+      RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-120}
+      EVALUATION_API_KEY=${EVALUATION_API_KEY:-}
+      CORS_ORIGINS=${CORS_ORIGINS:-}
+      AUTH_DB_PATH=${AUTH_DB_PATH:-data/auth.sqlite}
+      AUTH_COOKIE_SECURE=${AUTH_COOKIE_SECURE:-false}
+      MEMORY_DB_PATH=/opt/citywalk/data/memory.sqlite
+      EMBEDDING_API_KEY=${EMBEDDING_API_KEY}
+      EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding}
+      EMBEDDING_MODEL=${EMBEDDING_MODEL:-tongyi-embedding-vision-flash}
+      EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-768}
+      EMBEDDING_TIMEOUT_MS=${EMBEDDING_TIMEOUT_MS:-20000}
       ENVEOF
     - cd /opt/citywalk && npm install --production --registry https://registry.npmmirror.com
     - pkill -f 'node.*dist/server' || true
     - nohup node dist/server.js > /opt/citywalk/app.log 2>&1 &
-    - echo "Agent 应用部署完成"
+    - |
+      for attempt in $(seq 1 20); do
+        if node -e "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; then
+          echo "Agent 健康检查通过"
+          exit 0
+        fi
+        sleep 1
+      done
+      echo "Agent 健康检查失败，最近日志："
+      tail -n 80 /opt/citywalk/app.log || true
+      exit 1
   environment:
     name: production
     url: http://106.14.66.114

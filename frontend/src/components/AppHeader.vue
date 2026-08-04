@@ -1,105 +1,63 @@
 <script setup lang="ts">
-import { inject, ref } from 'vue'
-import type { Ref } from 'vue'
+import { computed, inject, ref, type Ref } from 'vue'
+import {
+  PhArrowLeft, PhBooks, PhCaretDown, PhCaretRight, PhMapPinLine,
+  PhMapTrifold, PhSignOut, PhSlidersHorizontal, PhUserCircle,
+} from '@phosphor-icons/vue'
 import type { useAgentPlan } from '../composables/useAgentPlan'
+import type { useAuth } from '../composables/useAuth'
+import type { JournalController } from '../composables/useJournal'
+import type { WorkspacePage, NavigateWorkspace } from '../workspace'
 
 const agent = inject<ReturnType<typeof useAgentPlan>>('agent')!
-const showDebugJson = inject<Ref<boolean>>('showDebugJson')!
-const showHistory = inject<Ref<boolean>>('showHistory', ref(false))
+const auth = inject<ReturnType<typeof useAuth>>('auth')!
+const journal = inject<JournalController>('journal')!
+const activePage = inject<Ref<WorkspacePage>>('activePage')!
+const navigate = inject<NavigateWorkspace>('navigate')!
+const menuOpen = ref(false)
+
+const initials = computed(() => (auth.user.value?.username ?? 'W').slice(0, 2).toUpperCase())
+const pageTitle = computed(() => ({ chat: '对话手账', profile: '旅行者档案', preferences: '个人偏好', scrapbook: '手账书架', walk: '随身记录' })[activePage.value])
+
+function go(page: WorkspacePage) {
+  navigate(page)
+  menuOpen.value = false
+}
+
+async function logout() {
+  menuOpen.value = false
+  await auth.logout()
+  agent.reset()
+}
 </script>
 
 <template>
   <header class="app-header">
-    <div class="header-brand">
-      <div class="logo-box">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <circle cx="12" cy="12" r="10" stroke="#d4570a" stroke-width="1.6" fill="#fff5f0"/>
-          <circle cx="12" cy="12" r="2.5" fill="#d4570a"/>
-          <path d="M12 5v3M12 16v3M5 12h3M16 12h3" stroke="#d4570a" stroke-width="1.4" stroke-linecap="round"/>
-          <path d="M12 8L13 12H12H11L12 8Z" fill="#d4570a"/>
-          <path d="M12 16L13 12H12H11L12 16Z" fill="#d1cfc9"/>
-        </svg>
-      </div>
-      <span class="brand-name">CityWalk Pulse</span>
-    </div>
-
-    <div class="header-center" v-if="agent.result.value?.trace?.metadata">
-      <span class="model-tag">
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
-        {{ agent.result.value.trace.metadata.model }}
-      </span>
-      <span class="hc-sep">·</span>
-      <span class="hc-stat" v-if="agent.result.value.trace.metadata.response_time_ms">
-        {{ (agent.result.value.trace.metadata.response_time_ms / 1000).toFixed(1) }}s
-      </span>
-    </div>
-
-    <div class="header-actions">
-      <div class="status-pill">
-        <span class="status-dot" :class="agent.backendOnline.value === true ? 'dot-on' : agent.backendOnline.value === false ? 'dot-off' : 'dot-chk'" />
-        <span>{{ agent.backendOnline.value === null ? '检查中' : agent.backendOnline.value ? 'API 在线' : '离线' }}</span>
-      </div>
-
-      <button class="hdr-btn" :class="{ active: showHistory.value }" @click="showHistory = !showHistory" title="历史记录">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        历史
+    <button class="header-brand" @click="go('chat')"><span><PhMapTrifold :size="20" weight="duotone" /></span><strong>CityWalk Agent</strong></button>
+    <div class="header-page"><span>/</span>{{ pageTitle }}</div>
+    <div class="header-spacer" />
+    <button v-if="activePage !== 'chat'" class="back-chat" @click="go('chat')"><PhArrowLeft :size="15" /> 返回对话</button>
+    <span class="service-dot" :class="{ online: agent.backendOnline.value }"><i/>{{ agent.backendOnline.value ? '在线' : '连接中' }}</span>
+    <div class="profile-menu-wrap">
+      <button class="profile-trigger" :class="{ active: menuOpen }" @click="menuOpen = !menuOpen">
+        <span>{{ initials }}</span><strong>{{ auth.user.value?.username }}</strong><PhCaretDown :size="14" />
       </button>
-
-      <button class="hdr-btn" :disabled="agent.status.value === 'idle'" @click="agent.reset()">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.36"/></svg>
-        重置
-      </button>
+      <Transition name="menu">
+        <div v-if="menuOpen" class="profile-menu">
+          <div class="menu-passport"><span>{{ initials }}</span><div><small>CITYWALK PASSPORT</small><strong>{{ auth.user.value?.username }}</strong><p>{{ journal.entries.value.length }} 本手账 · {{ journal.activeWalk.value ? '正在漫步' : '等待下一次出发' }}</p></div></div>
+          <button @click="go('profile')"><PhUserCircle class="menu-icon" :size="21" /><div><strong>个人资料</strong><small>旅行者档案与收藏概览</small></div><PhCaretRight :size="14" /></button>
+          <button @click="go('preferences')"><PhSlidersHorizontal class="menu-icon" :size="21" /><div><strong>个人偏好与 Agent 设置</strong><small>记忆、节奏和默认规划方式</small></div><PhCaretRight :size="14" /></button>
+          <button @click="go('scrapbook')"><PhBooks class="menu-icon" :size="21" /><div><strong>手账书架</strong><small>编辑、排版与翻阅</small></div><PhCaretRight :size="14" /></button>
+          <button @click="go('walk')"><PhMapPinLine class="menu-icon" :size="21" /><div><strong>随身记录</strong><small>定位、照片与沿途图钉</small></div><PhCaretRight :size="14" /></button>
+          <button class="logout" @click="logout"><PhSignOut :size="16" /> 退出当前账号</button>
+        </div>
+      </Transition>
     </div>
   </header>
 </template>
 
 <style scoped>
-.app-header {
-  display: flex; align-items: center; gap: 20px;
-  padding: 0 24px; height: 58px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.header-brand { display: flex; align-items: center; gap: 10px; }
-.logo-box {
-  width: 36px; height: 36px; border-radius: 10px;
-  background: #fff5f0; border: 1px solid var(--accent-border);
-  display: flex; align-items: center; justify-content: center;
-}
-.brand-name { font-size: 16px; font-weight: 700; color: var(--text-h); letter-spacing: -.02em; }
-
-.header-center { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; }
-.model-tag {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 4px 12px; background: var(--surface-2);
-  border: 1px solid var(--border); border-radius: 999px;
-  font-size: 13px; font-family: var(--font-mono); color: var(--text-muted);
-}
-.hc-sep { font-size: 13px; color: var(--text-muted); }
-.hc-stat { font-size: 13px; color: var(--text-muted); }
-
-.header-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
-
-.status-pill {
-  display: flex; align-items: center; gap: 7px;
-  padding: 5px 12px; border: 1px solid var(--border);
-  border-radius: 999px; font-size: 12.5px; color: var(--text-muted);
-}
-.status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.dot-on  { background: #059669; box-shadow: 0 0 6px #059669; }
-.dot-off { background: #dc2626; }
-.dot-chk { background: var(--text-muted); animation: pulse-dot 1.2s ease-in-out infinite; }
-
-.hdr-btn {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 6px 13px; border: 1px solid var(--border);
-  border-radius: 8px; background: transparent;
-  color: var(--text-muted); font-family: var(--font-sans);
-  font-size: 13px; cursor: pointer;
-  transition: all .2s;
-}
-.hdr-btn:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-h); }
-.hdr-btn:disabled { opacity: .35; cursor: not-allowed; }
-.hdr-btn.active { background: #fff5f0; border-color: var(--accent-border); color: var(--accent); }
+.app-header{height:70px;flex:0 0 70px;display:flex;align-items:center;gap:14px;padding:0 25px;background:rgba(247,244,237,.94);border-bottom:1px solid var(--border-subtle);position:relative;z-index:80;backdrop-filter:blur(15px)}.header-brand{display:flex;align-items:center;gap:9px;border:0;background:transparent;color:var(--primary);cursor:pointer}.header-brand span{width:34px;height:34px;display:grid;place-items:center;border:1px solid var(--primary);border-radius:var(--radius-sm);transform:rotate(-2deg)}.header-brand strong{font:800 20px var(--font-display)}.header-page{display:flex;gap:12px;color:var(--text-muted);font-size:13px}.header-page span{opacity:.35}.header-spacer{flex:1}.back-chat{display:flex;align-items:center;gap:6px;padding:8px 12px;border:1px solid var(--border);border-radius:999px;background:rgba(255,255,255,.55);color:var(--text);font-size:13px;font-weight:700;cursor:pointer}.service-dot{display:flex;align-items:center;gap:6px;color:var(--text-muted);font-size:12px}.service-dot i{width:7px;height:7px;border-radius:50%;background:#a79991}.service-dot.online i{background:#56704d}.profile-menu-wrap{position:relative}.profile-trigger{display:flex;align-items:center;gap:8px;padding:4px 10px 4px 4px;border:1px solid var(--border);border-radius:999px;background:rgba(255,255,255,.64);color:var(--text);cursor:pointer}.profile-trigger>span{width:34px;height:34px;display:grid;place-items:center;border-radius:50%;background:var(--primary);color:#fff;font:800 12px var(--font-display)}.profile-trigger strong{max-width:140px;overflow:hidden;text-overflow:ellipsis;font-size:13px}.profile-trigger.active{border-color:var(--primary);box-shadow:0 0 0 3px var(--accent-dim)}
+.profile-menu{position:absolute;right:0;top:52px;width:340px;padding:13px;border:1px solid var(--border);border-radius:var(--radius);background:rgba(247,244,237,.98);box-shadow:0 22px 50px rgba(49,31,18,.2);backdrop-filter:blur(18px)}.profile-menu::before{content:'';position:absolute;top:-8px;right:52px;width:70px;height:18px;background:rgba(155,63,33,.13);transform:rotate(2deg)}.menu-passport{display:flex;align-items:center;gap:12px;padding:11px 10px 15px;border-bottom:1px dashed var(--border);margin-bottom:6px}.menu-passport>span{width:50px;height:50px;display:grid;place-items:center;border-radius:50%;border:3px double var(--primary);color:var(--primary);font:800 13px var(--font-display);transform:rotate(-5deg)}.menu-passport div{display:grid}.menu-passport small{color:var(--primary);font-size:11px;font-weight:800;letter-spacing:.08em}.menu-passport strong{font:700 17px var(--font-display)}.menu-passport p{color:var(--text-muted);font-size:12px}.profile-menu>button:not(.logout){width:100%;display:grid;grid-template-columns:33px 1fr auto;align-items:center;gap:10px;padding:11px;border:0;border-radius:var(--radius-control);background:transparent;color:var(--text);text-align:left;cursor:pointer}.profile-menu>button:not(.logout):hover{background:var(--surface-container)}.menu-icon{color:var(--primary);justify-self:center}.profile-menu>button>div{display:grid}.profile-menu>button strong{font-size:13px}.profile-menu>button small{color:var(--text-muted);font-size:12px}.profile-menu>button>svg:last-child{color:var(--text-muted)}.logout{width:100%;display:flex;align-items:center;justify-content:center;gap:7px;margin-top:6px;padding:10px;border:0;border-radius:999px;background:rgba(147,0,10,.08);color:#8b332c;font-size:12px;font-weight:800;cursor:pointer}.menu-enter-active,.menu-leave-active{transition:var(--transition)}.menu-enter-from,.menu-leave-to{opacity:0;transform:translateY(-7px) scale(.97)}
+@media(max-width:650px){.app-header{height:60px;flex-basis:60px;padding:0 13px}.header-brand strong{font-size:15px}.header-page,.service-dot,.back-chat,.profile-trigger strong{display:none}.profile-menu{position:fixed;top:66px;right:10px;left:10px;width:auto}}
 </style>

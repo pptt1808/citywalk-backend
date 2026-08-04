@@ -13,11 +13,11 @@ export class UrbanPulseAgent {
     this.graphRunner = new CityWalkGraphRunner(this.mapTool, this.weatherTool);
   }
 
-  async plan(input: UserConstraints | PlanRequest): Promise<PlanningResult> {
-    return this.graphRunner.run(input);
+  async plan(input: UserConstraints | PlanRequest, signal?: AbortSignal): Promise<PlanningResult> {
+    return this.graphRunner.run(input, signal);
   }
 
-  async planWithStateEventStream(input: PlanRequest, onDelta: (events: StateEvent[]) => void): Promise<PlanningResult> {
-    return this.graphRunner.streamStateEvents(input, onDelta);
+  async planWithStateEventStream(input: PlanRequest, onDelta: (events: StateEvent[]) => void, signal?: AbortSignal): Promise<PlanningResult> {
+    return this.graphRunner.streamStateEvents(input, onDelta, signal);
   }
 }

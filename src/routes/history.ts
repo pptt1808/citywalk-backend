@@ -5,10 +5,11 @@ import {
   deleteHistoryHandler,
   clearHistoryHandler
 } from "../controllers/historyController";
+import { asyncHandler } from "../middleware/http";
 
 export const historyRouter = Router();
 
-historyRouter.get("/", listHistoryHandler);
-historyRouter.get("/:id", getHistoryHandler);
-historyRouter.delete("/:id", deleteHistoryHandler);
-historyRouter.delete("/", clearHistoryHandler);
+historyRouter.get("/", asyncHandler(listHistoryHandler));
+historyRouter.get("/:id", asyncHandler(getHistoryHandler));
+historyRouter.delete("/:id", asyncHandler(deleteHistoryHandler));
+historyRouter.delete("/", asyncHandler(clearHistoryHandler));

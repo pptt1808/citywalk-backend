@@ -6,6 +6,11 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     port: 5173,
+    headers: {
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+    },
     // Dev proxy: forward /api to backend. In production, Nginx handles this.
     proxy: {
       '/api': {

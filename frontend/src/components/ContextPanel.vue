@@ -23,7 +23,7 @@ const budgetPercent = computed(() => {
 const timePercent = computed(() => {
   const res = agent.result.value
   if (!res || !res.totalEstimatedMinutes) return 0
-  const duration = (agent.lastRequest.value?.durationHours ?? 4) * 60
+  const duration = agent.lastRequest.value?.durationMinutes ?? 240
   return Math.min(100, Math.round((res.totalEstimatedMinutes / duration) * 100))
 })
 </script>
@@ -81,8 +81,8 @@ const timePercent = computed(() => {
         <div class="section-label">预计时长</div>
         <div class="meter-row">
           <span class="meter-label">{{ agent.result.value.totalEstimatedMinutes }} 分钟</span>
-          <span class="meter-limit" v-if="agent.lastRequest.value?.durationHours">
-            / {{ agent.lastRequest.value.durationHours * 60 }} 分钟
+          <span class="meter-limit" v-if="agent.lastRequest.value?.durationMinutes">
+            / {{ agent.lastRequest.value.durationMinutes }} 分钟
           </span>
         </div>
         <div class="meter-bar">

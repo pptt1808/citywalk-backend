@@ -38,21 +38,22 @@ watch(() => agent.status.value, (newVal, oldVal) => {
       <div v-if="agent.status.value === 'idle'" class="welcome-screen" key="welcome">
         <div class="welcome-icon">
           <svg width="60" height="60" viewBox="0 0 60 60" fill="none">
-            <rect width="60" height="60" rx="16" fill="#fff5f0"/>
+            <rect width="60" height="60" rx="16" fill="var(--primary-fixed)"/>
             <rect x="1" y="1" width="58" height="58" rx="15" stroke="#e5e2dc" stroke-width="1.5"/>
-            <circle cx="30" cy="30" r="17" stroke="#d4570a" stroke-width="2" stroke-opacity=".2"/>
-            <circle cx="30" cy="30" r="9.5" stroke="#d4570a" stroke-width="1.5"/>
-            <circle cx="30" cy="30" r="2.8" fill="#d4570a"/>
-            <line x1="30" y1="14" x2="30" y2="19" stroke="#d4570a" stroke-width="2" stroke-linecap="round"/>
-            <line x1="30" y1="41" x2="30" y2="46" stroke="#d4570a" stroke-width="2" stroke-linecap="round"/>
-            <line x1="14" y1="30" x2="19" y2="30" stroke="#d4570a" stroke-width="2" stroke-linecap="round"/>
-            <line x1="41" y1="30" x2="46" y2="30" stroke="#d4570a" stroke-width="2" stroke-linecap="round"/>
-            <path d="M30 21L32 30H30H28L30 21Z" fill="#d4570a"/>
+            <circle cx="30" cy="30" r="17" stroke="var(--primary)" stroke-width="2" stroke-opacity=".2"/>
+            <circle cx="30" cy="30" r="9.5" stroke="var(--primary)" stroke-width="1.5"/>
+            <circle cx="30" cy="30" r="2.8" fill="var(--primary)"/>
+            <line x1="30" y1="14" x2="30" y2="19" stroke="var(--primary)" stroke-width="2" stroke-linecap="round"/>
+            <line x1="30" y1="41" x2="30" y2="46" stroke="var(--primary)" stroke-width="2" stroke-linecap="round"/>
+            <line x1="14" y1="30" x2="19" y2="30" stroke="var(--primary)" stroke-width="2" stroke-linecap="round"/>
+            <line x1="41" y1="30" x2="46" y2="30" stroke="var(--primary)" stroke-width="2" stroke-linecap="round"/>
+            <path d="M30 21L32 30H30H28L30 21Z" fill="var(--primary)"/>
             <path d="M30 39L32 30H30H28L30 39Z" fill="#d1cfc9"/>
           </svg>
         </div>
-        <h1 class="welcome-title">你好，想去哪里漫游？</h1>
-        <p class="welcome-sub">在左侧输入目的地和需求，AI Agent 自动查天气、找 POI、规划最优路线</p>
+        <span class="welcome-kicker">YOUR CITY, YOUR RHYTHM</span>
+        <h1 class="welcome-title">今天，想从哪条街开始？</h1>
+        <p class="welcome-sub">聊路线，也聊天气、地点和曾经喜欢过的风格。满意后把路线收藏起来，带着它真正去走一遍。</p>
 
         <div class="feature-cards">
           <div class="feature-card">
@@ -134,7 +135,7 @@ watch(() => agent.status.value, (newVal, oldVal) => {
               <polyline points="9 11 12 14 22 4"/>
               <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
             </svg>
-            路线规划
+            {{ agent.result.value?.responseKind === 'route' ? '路线规划' : '回答结果' }}
             <span class="tab-new" v-if="agent.isDone.value && activeTab !== 'result'">NEW</span>
           </button>
 
@@ -149,7 +150,7 @@ watch(() => agent.status.value, (newVal, oldVal) => {
           </button>
 
           <!-- Summary pills -->
-          <div class="tab-pills" v-if="agent.isDone.value && agent.result.value">
+          <div class="tab-pills" v-if="agent.isDone.value && agent.result.value?.responseKind === 'route'">
             <span class="pill pill-green">¥{{ agent.result.value.totalEstimatedCost }}</span>
             <span class="pill pill-blue">{{ agent.result.value.totalEstimatedMinutes }}分钟</span>
             <span class="pill pill-gray">{{ agent.result.value.stops.length }} 处</span>
@@ -183,7 +184,9 @@ watch(() => agent.status.value, (newVal, oldVal) => {
 <style scoped>
 .agent-console {
   display: flex; flex-direction: column;
-  overflow: hidden; background: var(--bg);
+  overflow: hidden; background-color: var(--bg);
+  background-image: radial-gradient(rgba(151,68,0,.1) .65px, transparent .65px);
+  background-size: 17px 17px;
   position: relative;
 }
 
@@ -194,23 +197,25 @@ watch(() => agent.status.value, (newVal, oldVal) => {
   align-items: center; justify-content: center;
   gap: 20px; padding: 40px 32px; text-align: center;
 }
-.welcome-icon { margin-bottom: 4px; }
-.welcome-title { font-size: 30px; font-weight: 700; color: var(--text-h); letter-spacing: -.03em; }
+.welcome-icon { margin-bottom: 0; transform: rotate(-5deg); filter: sepia(.2); }
+.welcome-kicker { color: var(--primary); font-size: 9px; font-weight: 800; letter-spacing: .2em; margin-bottom: -10px; }
+.welcome-title { font: 800 35px var(--font-display); color: var(--primary); letter-spacing: -.035em; }
 .welcome-sub { font-size: 14px; color: var(--text-muted); max-width: 430px; line-height: 1.7; }
 .feature-cards {
   display: grid; grid-template-columns: repeat(3, 1fr);
   gap: 14px; width: 100%; max-width: 620px; margin-top: 10px;
 }
 .feature-card {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 14px; padding: 22px 18px; text-align: left;
-  box-shadow: 0 1px 3px rgba(0,0,0,.03);
+  background: rgba(255,255,255,.68); border: 1px solid var(--border);
+  border-radius: 17px 6px 17px 6px; padding: 22px 18px; text-align: left;
+  box-shadow: var(--shadow-paper);
   transition: transform .2s, box-shadow .2s, border-color .2s;
 }
-.feature-card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.06); border-color: var(--accent-border); }
+.feature-card:nth-child(1) { transform: rotate(-.7deg); }.feature-card:nth-child(3) { transform: rotate(.7deg); }
+.feature-card:hover { transform: translateY(-4px) rotate(0); box-shadow: 0 10px 25px rgba(86,67,56,.12); border-color: var(--accent-border); }
 .fc-icon {
   width: 44px; height: 44px; border-radius: 12px;
-  background: var(--accent-dim); border: 1px solid var(--accent-border);
+  background: var(--primary-fixed); border: 1px dashed var(--accent-border);
   display: flex; align-items: center; justify-content: center; margin-bottom: 12px;
 }
 .fc-title { font-size: 14px; font-weight: 700; color: var(--text-h); margin-bottom: 6px; }
@@ -243,7 +248,7 @@ watch(() => agent.status.value, (newVal, oldVal) => {
 .tab-bar {
   display: flex; align-items: center; gap: 2px;
   padding: 0 16px; height: 44px; flex-shrink: 0;
-  background: var(--surface); border-bottom: 1px solid var(--border);
+  background: rgba(252,249,240,.88); border-bottom: 1px solid var(--border); backdrop-filter: blur(10px);
   overflow-x: auto;
 }
 .tab-btn {
@@ -292,7 +297,7 @@ watch(() => agent.status.value, (newVal, oldVal) => {
 }
 .hist-toggle.active { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
 
-/* Tab panels — crossfade via opacity */
+/* Tab panels: crossfade via opacity */
 .tab-panels {
   flex: 1; position: relative; overflow: hidden;
 }

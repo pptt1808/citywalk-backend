@@ -26,7 +26,11 @@ function finalAnswer(steps: TraceStep[]): string {
 
 function checkCase(testCase: AgentCase, steps: TraceStep[]) {
   const tools = toolCalls(steps);
-  const missingTools = (testCase.expect?.expectedTools ?? []).filter((tool) => !tools.includes(tool));
+  const missingTools = (testCase.expect?.expectedTools ?? []).filter((tool) => {
+    // No map key or missing geocode falls back from nearby search to city-wide search.
+    if (tool === "search_poi_nearby") return !tools.includes("search_poi_nearby") && !tools.includes("search_poi");
+    return !tools.includes(tool);
+  });
   const tooManySteps =
     typeof testCase.expect?.expectedMaxSteps === "number" && steps.length > testCase.expect.expectedMaxSteps;
 

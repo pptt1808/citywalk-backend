@@ -5,7 +5,8 @@ const mapTool = new MapTool();
 
 export async function geocodeHandler(req: Request, res: Response) {
   const address = String(req.query.address ?? "");
-  const city = String(req.query.city ?? "南京");
+  const city = requiredCity(req, res);
+  if (!city) return;
   if (!address.trim()) {
     return res.status(400).json({ message: "缺少 address 参数" });
   }
@@ -18,7 +19,8 @@ export async function poiSearchHandler(req: Request, res: Response) {
     .split(/[,，]/)
     .map((s) => s.trim())
     .filter(Boolean);
-  const city = String(req.query.city ?? "南京");
+  const city = requiredCity(req, res);
+  if (!city) return;
   const location = firstQuery(req.query.location);
   const radius = Number(req.query.radius) || undefined;
   const indoorOnly = req.query.indoorOnly === "true";
@@ -36,7 +38,8 @@ export async function routeHandler(req: Request, res: Response) {
   const origin = String(req.query.origin ?? "");
   const destination = String(req.query.destination ?? "");
   const mode = String(req.query.mode || "walk") as "walk" | "transit" | "bicycling";
-  const city = String(req.query.city ?? "南京");
+  const city = requiredCity(req, res);
+  if (!city) return;
 
   if (!origin.trim() || !destination.trim()) {
     return res.status(400).json({ message: "缺少 origin 或 destination 参数" });
@@ -73,7 +76,8 @@ export async function multiRouteHandler(req: Request, res: Response) {
   const origin = String(req.query.origin ?? "");
   const destinationsRaw = String(req.query.destinations ?? "");
   const mode = String(req.query.mode || "walk") as "walk" | "transit" | "mixed";
-  const city = String(req.query.city ?? "南京");
+  const city = requiredCity(req, res);
+  if (!city) return;
 
   if (!origin.trim() || !destinationsRaw.trim()) {
     return res.status(400).json({ message: "缺少 origin 或 destinations 参数" });
@@ -89,7 +93,8 @@ export async function multiRouteHandler(req: Request, res: Response) {
 }
 
 export async function cityCenterHandler(req: Request, res: Response) {
-  const city = String(req.query.city ?? "南京");
+  const city = requiredCity(req, res);
+  if (!city) return;
   const location = await mapTool.geocode(city, city);
   return res.status(200).json({ city, center: location });
 }
@@ -97,4 +102,11 @@ export async function cityCenterHandler(req: Request, res: Response) {
 function firstQuery(value: unknown): string | undefined {
   const v = Array.isArray(value) ? value[0] : value;
   return typeof v === "string" ? v : undefined;
+}
+
+function requiredCity(req: Request, res: Response): string | undefined {
+  const city = String(req.query.city ?? "").trim();
+  if (city) return city;
+  res.status(400).json({ message: "缺少 city 参数；服务端不会自动使用默认城市" });
+  return undefined;
 }

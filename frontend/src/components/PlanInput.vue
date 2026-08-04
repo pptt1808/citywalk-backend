@@ -2,6 +2,7 @@
 import { inject, ref, computed } from 'vue'
 import type { useAgentPlan } from '../composables/useAgentPlan'
 import type { PlanRequest } from '../api/agent'
+import { getMemoryThreadId, getMemoryUserId } from '../utils/identity'
 
 const agent = inject<ReturnType<typeof useAgentPlan>>('agent')!
 
@@ -10,11 +11,11 @@ type ModelChoice = 'flash' | 'pro'
 const selectedModel = ref<ModelChoice>('flash')
 
 const templates = [
-  { icon: '🌤', label: '周末漫步', text: '南京周末轻松漫步，3小时，预算100元以内，想去特色书店和咖啡馆' },
-  { icon: '🏛', label: '深度文化', text: '深度文化游，参观博物馆和历史街区，5小时，预算200元' },
-  { icon: '🍜', label: '美食探店', text: '美食探店之旅，2小时，120元，推荐本地特色小吃' },
-  { icon: '🌧', label: '雨天室内', text: '今天可能下雨，安排以室内为主的路线，4小时，150元' },
-  { icon: '🚇', label: '地铁沿线', text: '地铁沿线游玩，玄武湖+南博+新街口，全天，80元' },
+  { icon: '🌤', label: '制作路线', text: '规划一条南京周末轻松漫步路线，3小时，预算100元以内，想去特色书店和咖啡馆' },
+  { icon: '📍', label: '发现地点', text: '新街口附近有什么安静、有设计感的独立书店？' },
+  { icon: '🏛', label: '查询信息', text: '南京博物院需要预约吗？有哪些参观注意事项？' },
+  { icon: '⚖️', label: '比较路线', text: '比较我刚才提到的两条路线，重点看时间、花费和亲子友好程度' },
+  { icon: '✍️', label: '分享文案', text: '根据刚才的路线生成三条不同语气的朋友圈文案' },
 ]
 
 const isRunning = computed(() => agent.isRunning.value)
@@ -24,7 +25,12 @@ function applyTemplate(text: string) { taskText.value = text }
 async function handleSubmit() {
   const task = taskText.value.trim()
   if (!task) return
-  const req: PlanRequest = { task, preferredModel: selectedModel.value }
+  const req: PlanRequest = {
+    task,
+    preferredModel: selectedModel.value,
+    userId: getMemoryUserId(),
+    threadId: getMemoryThreadId(),
+  }
   await agent.run(req)
 }
 
@@ -39,13 +45,13 @@ function handleKeydown(e: KeyboardEvent) {
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>
       </svg>
-      <h2 class="panel-title">规划任务</h2>
+      <div><small>PLAN A NEW WALK</small><h2 class="panel-title">写下漫游灵感</h2></div>
     </div>
 
     <div class="input-section">
-      <label class="input-label">用自然语言描述你的 CityWalk</label>
-      <textarea v-model="taskText" class="task-textarea" placeholder="例：下午去新街口逛逛，顺便喝杯咖啡，最后去南京南站坐车，3小时，步行不超过30分钟…" rows="6" :disabled="isRunning" @keydown="handleKeydown" />
-      <p class="input-hint">⌘ + Enter 快速提交 · AI 自动识别城市、时长、偏好</p>
+      <label class="input-label">向 Agent 提问或描述路线需求</label>
+      <textarea v-model="taskText" class="task-textarea" placeholder="例：规划亲子路线；比较两条路线；查博物馆预约；根据上一条路线写朋友圈文案…" rows="6" :disabled="isRunning" @keydown="handleKeydown" />
+      <p class="input-hint">⌘ + Enter 快速提交 · Agent 会先识别真实意图</p>
     </div>
 
     <div class="template-section">
@@ -77,7 +83,7 @@ function handleKeydown(e: KeyboardEvent) {
     <button class="btn btn-primary submit-btn" :disabled="isRunning || !taskText.trim()" @click="handleSubmit">
       <template v-if="!isRunning">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-        开始规划
+        发送给 Agent
       </template>
       <template v-else>
         <span class="spinner" /> Agent 思考中…
@@ -96,19 +102,22 @@ function handleKeydown(e: KeyboardEvent) {
 <style scoped>
 .plan-input-panel {
   display: flex; flex-direction: column; gap: 20px;
-  padding: 22px 18px 18px;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
+  padding: 24px 20px 20px;
+  background-color: var(--surface-container-low);
+  background-image: radial-gradient(rgba(151,68,0,.1) .6px, transparent .6px);
+  background-size: 16px 16px;
+  border-right: 1px solid rgba(138,114,102,.18);
   overflow-y: auto;
 }
 .panel-header { display: flex; align-items: center; gap: 10px; }
-.panel-title { font-size: 16px; font-weight: 700; color: var(--text-h); }
+.panel-header small { color: var(--primary); font-size: 8px; font-weight: 800; letter-spacing: .15em; }
+.panel-title { font: 700 18px var(--font-display); color: var(--text-h); }
 
 .input-section { display: flex; flex-direction: column; gap: 8px; }
 .input-label { font-size: 13px; color: var(--text-muted); font-weight: 500; }
 .task-textarea {
-  width: 100%; background: var(--bg); border: 1.5px solid var(--border);
-  border-radius: 10px; color: var(--text-h); font-family: var(--font-sans);
+  width: 100%; background: repeating-linear-gradient(rgba(255,255,255,.58),rgba(255,255,255,.58) 27px,rgba(138,114,102,.13) 28px); border: 1.5px solid var(--border);
+  border-radius: 15px 5px 15px 5px; color: var(--text-h); font-family: var(--font-display);
   font-size: 14px; padding: 12px 14px; resize: vertical; min-height: 120px;
   line-height: 1.7; transition: border-color .2s, box-shadow .2s;
 }
@@ -121,12 +130,13 @@ function handleKeydown(e: KeyboardEvent) {
 .template-list { display: flex; flex-direction: column; gap: 6px; }
 .template-chip {
   display: flex; align-items: center; gap: 10px;
-  padding: 10px 13px; background: var(--bg); border: 1px solid var(--border);
-  border-radius: 9px; font-family: var(--font-sans); font-size: 13px;
+  padding: 10px 13px; background: rgba(255,255,255,.52); border: 1px solid var(--border);
+  border-radius: 12px 4px 12px 4px; font-family: var(--font-sans); font-size: 13px;
   color: var(--text); cursor: pointer; text-align: left;
   transition: all .15s;
 }
-.template-chip:hover:not(:disabled) { background: var(--accent-dim); border-color: var(--accent-border); }
+.template-chip:nth-child(even) { transform: rotate(.3deg); }
+.template-chip:hover:not(:disabled) { background: var(--primary-fixed); border-color: var(--accent-border); transform: translateX(3px); }
 .template-chip:disabled { opacity: .4; cursor: not-allowed; }
 .chip-icon { font-size: 17px; }
 .chip-label { font-size: 13.5px; }
@@ -141,10 +151,10 @@ function handleKeydown(e: KeyboardEvent) {
   color: var(--text-muted); cursor: pointer; transition: all .15s;
 }
 .model-pill:hover:not(:disabled) { border-color: var(--accent-border); color: var(--text-h); background: var(--accent-dim); }
-.model-pill.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.model-pill.active { background: var(--secondary-container); border-color: rgba(73,104,0,.3); color: var(--on-secondary-container); font-weight: 700; }
 .model-pill:disabled { opacity: .4; cursor: not-allowed; }
 
-.submit-btn { width: 100%; justify-content: center; padding: 13px; font-size: 15px; font-weight: 600; border-radius: 10px; }
+.submit-btn { width: 100%; justify-content: center; padding: 13px; font-size: 14px; font-weight: 700; border-radius: 999px; }
 .spinner { display: inline-block; width: 15px; height: 15px; border: 2px solid rgba(255,255,255,.35); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
 
 .error-box { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; font-size: 13px; color: #991b1b; line-height: 1.5; }

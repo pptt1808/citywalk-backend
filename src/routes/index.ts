@@ -2,13 +2,24 @@ import { Router } from "express";
 import { agentRouter } from "./agent";
 import { healthRouter } from "./health";
 import { historyRouter } from "./history";
+import { favoritesRouter } from "./favorites";
 import { mapRouter } from "./map";
+import { memoryRouter } from "./memory";
 import { planRouter } from "./plan";
+import { authRouter } from "./auth";
+import { evaluationRouter } from "./evaluation";
+import { journalRouter } from "./journal";
+import { requireAuth } from "../middleware/auth";
 
 export const apiRouter = Router();
 
 apiRouter.use("/health", healthRouter);
-apiRouter.use("/history", historyRouter);
+apiRouter.use("/auth", authRouter);
+apiRouter.use("/evaluation", evaluationRouter);
+apiRouter.use("/history", requireAuth, historyRouter);
+apiRouter.use("/favorites", requireAuth, favoritesRouter);
+apiRouter.use("/journal", requireAuth, journalRouter);
 apiRouter.use("/map", mapRouter);
-apiRouter.use("/plan", planRouter);
-apiRouter.use("/agent", agentRouter);
+apiRouter.use("/memories", requireAuth, memoryRouter);
+apiRouter.use("/plan", requireAuth, planRouter);
+apiRouter.use("/agent", requireAuth, agentRouter);
