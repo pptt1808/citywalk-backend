@@ -52,8 +52,47 @@ const StyleSchema = z.object({
   confidence: z.number().min(0).max(1).optional()
 }).optional();
 
+const DiscoveryPolicySchema = z.object({
+  sourcePolicy: z.enum(["map_only", "web_when_relevant", "web_assisted"]).optional(),
+  noveltyPreference: z.enum(["mainstream", "neutral", "long_tail"]).optional(),
+  avoidOverexposed: z.boolean().optional(),
+  exposureScopes: z.array(z.enum([
+    "all", "bookstore", "cafe", "sight", "museum", "mall", "park", "restaurant",
+    "shop", "market", "studio", "street_scene", "event"
+  ])).max(13).optional(),
+  exposureStrength: z.enum(["soft", "strict"]).optional()
+}).optional();
+
+const TemporalSchema = z.object({
+  timezone: z.literal("Asia/Shanghai").optional(),
+  visitDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u).optional(),
+  startTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/u).optional(),
+  departureAt: z.string().datetime({ offset: true }).optional(),
+  period: z.enum(["morning", "afternoon", "evening", "night"]).optional(),
+  precision: z.enum(["exact", "period", "date_only", "unspecified"]).optional(),
+  sourceText: z.string().max(100).optional()
+}).optional();
+
+const AgentIntentSchema = z.enum([
+  "route_create", "route_modify", "route_compare", "route_review", "poi_discovery",
+  "navigation_query", "info_query", "memory_query", "history_query", "preference_feedback",
+  "social_copy", "general_chat"
+]);
+const ActiveSkillSchema = z.object({
+  id: z.string().trim().min(1).max(128).regex(/^[a-zA-Z0-9._:-]+$/u),
+  name: z.string().trim().min(1).max(40),
+  description: z.string().trim().max(160).optional(),
+  instruction: z.string().trim().min(1).max(1600),
+  priority: z.enum(["preference", "requirement"]).optional(),
+  applicableIntents: z.array(AgentIntentSchema).max(12).optional(),
+  version: z.number().int().min(1).optional()
+});
+
 const PlanRequestSchema = z.object({
   task: z.string().trim().min(1).max(2000).optional(),
+  attachments: z.array(z.string().trim().min(1).max(240)).max(20).optional(),
+  activeSkillIds: z.array(z.string().trim().min(1).max(128).regex(/^[a-zA-Z0-9._:-]+$/u)).max(5).optional(),
+  activeSkills: z.array(ActiveSkillSchema).max(5).optional(),
   city: z.string().trim().min(1).max(100).optional(),
   startPoint: z.string().trim().min(1).max(300).optional(),
   durationMinutes: z.number().int().positive().max(1440).optional(),
@@ -65,6 +104,9 @@ const PlanRequestSchema = z.object({
   accessibility: AccessibilitySchema.optional(),
   style: StyleSchema,
   styleDescription: z.string().min(1).max(500).optional(),
+  discoveryMode: z.enum(["reliable", "balanced", "hidden_gems"]).optional(),
+  discoveryPolicy: DiscoveryPolicySchema,
+  temporal: TemporalSchema,
   transportMode: z.enum(["walk", "transit", "mixed"]).optional(),
   weatherPreference: z.enum(["avoid_rain", "indoor_first", "outdoor_ok"]).optional(),
   weatherRisk: z.enum(["low", "medium", "high"]).optional(),
@@ -95,6 +137,7 @@ function planRequestFromQuery(query: Request["query"]): PlanRequest {
   const weatherPref = firstQuery(query.weatherPreference) as PlanRequest["weatherPreference"] | undefined;
   const weatherR = firstQuery(query.weatherRisk) as PlanRequest["weatherRisk"] | undefined;
   const model = firstQuery(query.preferredModel) as PlanRequest["preferredModel"] | undefined;
+  const discoveryMode = firstQuery(query.discoveryMode) as PlanRequest["discoveryMode"] | undefined;
   const bool = (key: string) => {
     const value = firstQuery(query[key]);
     return value === "true" ? true : value === "false" ? false : undefined;
@@ -146,12 +189,21 @@ function planRequestFromQuery(query: Request["query"]): PlanRequest {
     experience: hasExperience ? experience : undefined,
     accessibility: hasAccessibility ? accessibility : undefined,
     styleDescription,
+    discoveryMode,
+    temporal: {
+      timezone: "Asia/Shanghai",
+      visitDate: firstQuery(query.visitDate),
+      startTime: firstQuery(query.startTime),
+      departureAt: firstQuery(query.departureAt),
+      period: firstQuery(query.timePeriod) as NonNullable<PlanRequest["temporal"]>["period"]
+    },
     transportMode: transport,
     weatherPreference: weatherPref,
     weatherRisk: weatherR,
     preferredModel: model,
     endPoint: firstQuery(query.endPoint),
     maxLegMinutes: n("maxLegMinutes") !== undefined ? Math.floor(n("maxLegMinutes")!) : undefined,
+    activeSkillIds: firstQuery(query.activeSkillIds)?.split(/[,，]/u).map((item) => item.trim()).filter(Boolean),
     userId: firstQuery(query.userId),
     threadId: firstQuery(query.threadId)
   };

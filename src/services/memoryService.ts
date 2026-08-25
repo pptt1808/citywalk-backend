@@ -15,6 +15,7 @@ import {
   UserConstraints
 } from "../types/plan";
 import { memoryStore, MemoryStore } from "./memoryStore";
+import { walkSessionStore, WalkBehaviorEventRecord } from "./walkSessionStore";
 import { compileHeuristicStyle, emptyStyleIntent, isStyleActive, mergeStyleIntents, normalizeStyleIntent } from "./styleService";
 
 const DURABLE_MEMORY_SIGNAL =
@@ -22,13 +23,17 @@ const DURABLE_MEMORY_SIGNAL =
 
 const CATEGORY_TERMS = [
   "书店", "咖啡", "博物馆", "美术馆", "展览", "公园", "街区", "商场",
-  "美食", "餐厅", "景点", "奶茶", "甜品", "影院", "酒吧", "夜市"
+  "美食", "餐厅", "景点", "奶茶", "甜品", "影院", "酒吧", "夜市",
+  "古着", "唱片店", "买手店", "花店", "杂货店", "文创店", "二手店", "独立小店",
+  "菜市场", "市集", "街市", "工作室", "工坊", "手作", "小巷", "胡同", "天桥", "步道"
 ];
 
 const CATEGORY_ALIASES: Record<string, string> = {
   bookstore: "书店", books: "书店", cafe: "咖啡", coffee: "咖啡",
   museum: "博物馆", gallery: "美术馆", park: "公园", mall: "商场",
-  restaurant: "餐厅", food: "美食", sight: "景点", cinema: "影院"
+  restaurant: "餐厅", food: "美食", sight: "景点", cinema: "影院",
+  shop: "特色小店", market: "市场与市集", studio: "工作室与工坊",
+  street_scene: "街巷城市空间", event: "城市活动"
 };
 
 export interface MemoryEmbeddingStatus {
@@ -52,6 +57,138 @@ function slug(value: string): string {
 
 function userAuthoredTask(task: string): string {
   return task.split(/\n<citywalk_ui_context>/u, 1)[0].trim();
+}
+
+const OBSERVED_CATEGORY_LABELS: Record<string, string> = {
+  bookstore: "书店",
+  cafe: "咖啡",
+  sight: "城市景点",
+  museum: "博物馆与展览",
+  mall: "商场",
+  park: "公园与绿地",
+  restaurant: "餐厅",
+  shop: "特色小店",
+  market: "市场与市集",
+  studio: "工作室与工坊",
+  street_scene: "街巷城市空间",
+  event: "城市活动"
+};
+
+function stringStyleTags(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => typeof item === "string" ? item : item && typeof item === "object" && "name" in item ? String(item.name) : "")
+    .map((item) => item.trim()).filter(Boolean);
+}
+
+/**
+ * Converts repeated, completed-walk behavior into low-confidence candidates.
+ * One walk, one skip, rain, or a repeated click inside the same walk is never
+ * enough to create a durable preference.
+ */
+export function compileWalkBehaviorCandidates(events: WalkBehaviorEventRecord[], now = Date.now()): MemoryCandidate[] {
+  const recent = events.filter((event) => now - new Date(event.createdAt).getTime() <= 180 * 24 * 60 * 60_000);
+  const finishedWalks = new Set(recent.filter((event) => event.eventType === "walk_finished").map((event) => event.walkId));
+  if (finishedWalks.size < 2) return [];
+  const candidates: MemoryCandidate[] = [];
+
+  const categoryWalks = new Map<string, Set<string>>();
+  const categoryVisits = new Map<string, number>();
+  for (const event of recent.filter((item) => item.eventType === "stop_completed" && finishedWalks.has(item.walkId))) {
+    const category = String(event.payload.category ?? "").trim();
+    if (!OBSERVED_CATEGORY_LABELS[category]) continue;
+    const walks = categoryWalks.get(category) ?? new Set<string>();
+    walks.add(event.walkId);
+    categoryWalks.set(category, walks);
+    categoryVisits.set(category, (categoryVisits.get(category) ?? 0) + 1);
+  }
+  for (const [category, walks] of categoryWalks) {
+    if (walks.size < 2) continue;
+    const visits = categoryVisits.get(category) ?? walks.size;
+    const label = OBSERVED_CATEGORY_LABELS[category];
+    const confidence = Math.min(0.78, 0.42 + walks.size * 0.06 + visits * 0.03);
+    candidates.push({
+      kind: "semantic",
+      key: `preference:category:${slug(label)}`,
+      text: `最近多次实际漫步中，用户经常完成${label}类站点`,
+      data: { category: label, evidence: { completedWalks: walks.size, completedStops: visits, windowDays: 180 } },
+      polarity: "positive",
+      confidence,
+      source: "system_observed"
+    });
+  }
+
+  const reasonWalks = new Map<string, Set<string>>();
+  for (const event of recent.filter((item) => item.eventType === "route_adjusted" && finishedWalks.has(item.walkId))) {
+    const reason = String(event.payload.reason ?? "");
+    const walks = reasonWalks.get(reason) ?? new Set<string>();
+    walks.add(event.walkId);
+    reasonWalks.set(reason, walks);
+  }
+  const relaxedEvidence = new Set([...(reasonWalks.get("tired") ?? []), ...(reasonWalks.get("rest") ?? [])]);
+  const crowdEvidence = reasonWalks.get("crowded") ?? new Set<string>();
+  const restroomEvidence = reasonWalks.get("restroom") ?? new Set<string>();
+  if (relaxedEvidence.size >= 2 || crowdEvidence.size >= 2 || restroomEvidence.size >= 2) {
+    const data = {
+      pace: relaxedEvidence.size >= 2 ? "relaxed" : undefined,
+      restStopRequired: relaxedEvidence.size >= 2 ? true : undefined,
+      avoidCrowds: crowdEvidence.size >= 2 ? true : undefined,
+      restroomPreferred: restroomEvidence.size >= 2 ? true : undefined,
+      evidence: {
+        tiredOrRestWalks: relaxedEvidence.size,
+        crowdedWalks: crowdEvidence.size,
+        restroomWalks: restroomEvidence.size,
+        windowDays: 180
+      }
+    };
+    const traits = [
+      relaxedEvidence.size >= 2 ? "更轻松且有休息点" : "",
+      crowdEvidence.size >= 2 ? "主动避开拥挤" : "",
+      restroomEvidence.size >= 2 ? "重视沿途卫生间" : ""
+    ].filter(Boolean).join("、");
+    const evidenceCount = relaxedEvidence.size + crowdEvidence.size + restroomEvidence.size;
+    candidates.push({
+      kind: "procedural",
+      key: "planning:experience",
+      text: `根据多次实际改路行为，用户通常需要${traits}的路线`,
+      data,
+      polarity: "neutral",
+      confidence: Math.min(0.78, 0.48 + evidenceCount * 0.05),
+      source: "system_observed"
+    });
+  }
+
+  const styleWalks = new Map<string, Set<string>>();
+  for (const event of recent.filter((item) => item.eventType === "walk_finished")) {
+    for (const tag of stringStyleTags(event.payload.styleTags)) {
+      const walks = styleWalks.get(tag) ?? new Set<string>();
+      walks.add(event.walkId);
+      styleWalks.set(tag, walks);
+    }
+  }
+  const durableTags = [...styleWalks.entries()].filter(([, walks]) => walks.size >= 2)
+    .sort((left, right) => right[1].size - left[1].size).slice(0, 8);
+  if (durableTags.length) {
+    const confidence = Math.min(0.75, 0.46 + Math.max(...durableTags.map(([, walks]) => walks.size)) * 0.07);
+    const names = durableTags.map(([name]) => name);
+    candidates.push({
+      kind: "semantic",
+      key: "preference:style",
+      text: `用户完成过多条带有“${names.join("、")}”特征的路线，可能长期偏好这些氛围`,
+      data: {
+        style: {
+          rawText: names.join("、"),
+          summary: `偏好${names.join("、")}的实际漫步氛围`,
+          tags: durableTags.map(([name, walks]) => ({ name, weight: Math.min(1, 0.5 + walks.size * 0.1), evidence: `${walks.size} 次完成路线` })),
+          desiredScenes: [], avoidances: [], searchHints: names, narrativeArc: [], confidence
+        },
+        evidence: { completedWalks: finishedWalks.size, windowDays: 180 }
+      },
+      polarity: "neutral",
+      confidence,
+      source: "system_observed"
+    });
+  }
+  return candidates;
 }
 
 function positiveInteger(value: unknown): number | undefined {
@@ -327,6 +464,11 @@ export class MemoryService {
     });
   }
 
+  async learnFromWalkBehavior(userId: string): Promise<MemoryMutationResult> {
+    const candidates = compileWalkBehaviorCandidates(walkSessionStore.listEvents(userId, 1000));
+    return this.reconcile(userId, undefined, candidates);
+  }
+
   getEmbeddingStatus(userId: string): MemoryEmbeddingStatus {
     const stats = this.store.getEmbeddingStats(userId, this.embeddings.model, this.embeddings.dimensions);
     const retryAfter = this.embeddingRetryAfter > Date.now()
@@ -398,6 +540,17 @@ export class MemoryService {
       && requestedExisting.key === normalizedCandidate.key
         ? requestedExisting
         : this.store.findByKey(userId, normalizedCandidate.kind, normalizedCandidate.key);
+
+    if (existing?.status === "active"
+      && normalizedCandidate.source === "system_observed"
+      && (existing.source === "user_explicit" || existing.source === "user_feedback")) {
+      return {
+        event: "NONE",
+        candidate: normalizedCandidate,
+        memoryId: existing.id,
+        reason: "显式偏好优先，观察行为不会覆盖用户亲自确认的记忆"
+      };
+    }
 
     if (normalizedCandidate.actionHint === "DELETE") {
       if (!existing || existing.status === "deleted") {

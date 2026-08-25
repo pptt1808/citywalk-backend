@@ -8,18 +8,95 @@ export type PoiCategory =
   | 'mall'
   | 'park'
   | 'restaurant'
+  | 'shop'
+  | 'market'
+  | 'studio'
+  | 'street_scene'
+  | 'event'
+
+export type PlaceDiscoveryMode = 'reliable' | 'balanced' | 'hidden_gems'
 
 export type AgentIntent =
   | 'route_create' | 'route_modify' | 'route_compare' | 'route_review'
   | 'poi_discovery' | 'navigation_query' | 'info_query' | 'memory_query'
   | 'history_query' | 'preference_feedback' | 'social_copy' | 'general_chat'
+export type AgentSkillActivation = 'manual' | 'recommended'
+export type AgentSkillPriority = 'preference' | 'requirement'
+export interface AgentSkill {
+  id: string
+  userId?: string
+  name: string
+  description: string
+  instruction: string
+  enabled: boolean
+  applicableIntents: AgentIntent[]
+  activation: AgentSkillActivation
+  priority: AgentSkillPriority
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+export interface AgentSkillInput {
+  id: string
+  name: string
+  description?: string
+  instruction: string
+  priority?: AgentSkillPriority
+  applicableIntents?: AgentIntent[]
+  version?: number
+}
+export interface AgentSkillExecution {
+  skillId: string
+  name: string
+  version: number
+  status: 'applied' | 'partially_applied' | 'skipped'
+  appliedRules: string[]
+  overriddenRules: string[]
+  unsupportedRules: string[]
+}
 export type AgentResponseKind = 'route' | 'comparison' | 'information' | 'memory' | 'social_copy' | 'chat'
 export interface IntentClassification { intent: AgentIntent; confidence: number; reason: string }
 export interface ContentSection { title: string; items: string[] }
 export interface ComparisonOption { name: string; metrics: Record<string, string>; pros: string[]; cons: string[] }
 export interface RouteComparison { dimensions: string[]; options: ComparisonOption[]; recommendation: string; missingInformation?: string[] }
 export interface SocialCopyVariant { tone: string; text: string; hashtags: string[] }
-export interface SocialCopyResult { variants: SocialCopyVariant[]; basedOnRoute: boolean }
+export type SocialCopyPlatform = 'moments' | 'xiaohongshu' | 'weibo' | 'caption' | 'general'
+export type SocialCopyStyleSource = 'default' | 'preset' | 'custom' | 'reference'
+export interface SocialCopyStyleProfile {
+  label: string
+  rawText: string
+  source: SocialCopyStyleSource
+  signature: {
+    sentenceRhythm: string
+    narrativeMove: string
+    detailLens: string
+    diction: string
+    ending: string
+  }
+  avoidances: string[]
+}
+export interface SocialCopyResult {
+  variants: SocialCopyVariant[]
+  basedOnRoute: boolean
+  platform?: SocialCopyPlatform
+  styleProfile?: SocialCopyStyleProfile
+  generationDiagnostics?: {
+    fallbackTriggered: boolean
+    fallbackVariants: Array<{
+      variantIndex: number
+      tone: string
+      originalText?: string
+      reasons: string[]
+      fallbackText: string
+    }>
+    regeneration?: {
+      attempted: boolean
+      attempts: number
+      reasons: string[]
+      exhausted: boolean
+    }
+  }
+}
 export type InformationSourceType = 'official_api' | 'official_link' | 'unverified'
 export interface InformationSource {
   title: string
@@ -33,7 +110,9 @@ export interface InformationSource {
   publishedAt?: string
 }
 export interface RouteWeatherSummary {
-  summary: string; risk: 'low' | 'medium' | 'high'; rainProbability: number
+  summary: string; risk: 'low' | 'medium' | 'high' | 'unknown'; rainProbability: number
+  decisionUsable?: boolean; forecastKind?: 'hourly' | 'daily' | 'unavailable'; targetDate?: string
+  timeRange?: { start: string; end: string }
   airQuality?: { aqi: number; category: string }; warning?: string; advice: string[]
 }
 export interface ConstraintTradeoff {
@@ -48,12 +127,12 @@ export interface ConstraintTradeoff {
 }
 export interface RouteOverview {
   title: string; city: string; startPoint: string; endPoint?: string; stopCount: number; partyLabel: string
-  time: { totalMinutes: number; travelMinutes: number; stayMinutes: number }
+  time: { totalMinutes: number; travelMinutes: number; stayMinutes: number; startAt?: string; endAt?: string; precision?: TravelTimePrecision }
   cost: { total: number; perPerson?: number; budget?: number }
   weather: RouteWeatherSummary; importantNotes: string[]; tradeoffs?: ConstraintTradeoff[]
 }
 
-export type ConstraintSource = 'request' | 'current_turn' | 'recent_context' | 'llm' | 'memory' | 'derived' | 'default'
+export type ConstraintSource = 'request' | 'current_turn' | 'recent_context' | 'llm' | 'skill' | 'memory' | 'derived' | 'default'
 export type ConstraintPriority = 'hard' | 'soft'
 
 export interface ConstraintLedgerEntry {
@@ -61,6 +140,8 @@ export interface ConstraintLedgerEntry {
   value: unknown
   source: ConstraintSource
   priority: ConstraintPriority
+  sourceId?: string
+  sourceLabel?: string
 }
 
 export interface PartyConstraints {
@@ -115,6 +196,35 @@ export interface StyleIntentInput {
   confidence?: number
 }
 
+export type PlaceDiscoverySourcePolicy = 'map_only' | 'web_when_relevant' | 'web_assisted'
+export type PlaceNoveltyPreference = 'mainstream' | 'neutral' | 'long_tail'
+export type PlaceExposureScope = 'all' | PoiCategory
+export type PlaceExposureStrength = 'soft' | 'strict'
+
+export interface PlaceDiscoveryPolicy {
+  sourcePolicy: PlaceDiscoverySourcePolicy
+  noveltyPreference: PlaceNoveltyPreference
+  avoidOverexposed: boolean
+  exposureScopes: PlaceExposureScope[]
+  exposureStrength: PlaceExposureStrength
+}
+
+export type PlaceDiscoveryPolicyInput = Partial<PlaceDiscoveryPolicy>
+
+export type TravelTimePeriod = 'morning' | 'afternoon' | 'evening' | 'night'
+export type TravelTimePrecision = 'exact' | 'period' | 'date_only' | 'unspecified'
+export interface TravelTemporalConstraint {
+  timezone: 'Asia/Shanghai'
+  precision: TravelTimePrecision
+  visitDate?: string
+  startTime?: string
+  departureAt?: string
+  period?: TravelTimePeriod
+  sourceText?: string
+  inferred?: boolean
+}
+export type TravelTemporalInput = Partial<TravelTemporalConstraint>
+
 export interface UserConstraints {
   city: string
   startPoint: string
@@ -125,6 +235,9 @@ export interface UserConstraints {
   party: PartyConstraints
   experience: RouteExperienceConstraints
   style: StyleIntent
+  discoveryMode: PlaceDiscoveryMode
+  discoveryPolicy: PlaceDiscoveryPolicy
+  temporal: TravelTemporalConstraint
   constraintLedger: ConstraintLedgerEntry[]
   transportMode?: 'walk' | 'transit' | 'mixed'
   weatherPreference?: 'avoid_rain' | 'indoor_first' | 'outdoor_ok'
@@ -143,6 +256,9 @@ export interface UserConstraints {
 export interface RouteStop {
   name: string
   category: PoiCategory
+  kind?: 'business' | 'culture' | 'landscape' | 'street_scene' | 'event'
+  subtype?: string
+  amapTypeCode?: string
   estimatedCost: number
   estimatedStayMinutes: number
   reason: string
@@ -156,12 +272,20 @@ export interface RouteStop {
   styleMatches?: string[]
   styleScore?: number
   styleConflicts?: string[]
+  discoverySource?: 'amap' | 'web' | 'curated' | 'community' | 'user'
+  verificationStatus?: 'verified' | 'map_matched' | 'unverified'
+  evidenceUrls?: string[]
+  discoveryReasons?: string[]
+  discoveryConfidence?: number
+  cityWalkScore?: number
   /** LLM 生成的费用明细，说明每一项开销来源 */
   costBreakdown?: string
   /** LLM 生成的亮点描述，一句话说明该地点特色 */
   highlight?: string
   /** LLM 生成的预约提醒 */
   bookingInfo?: string
+  estimatedArrivalAt?: string
+  estimatedDepartureAt?: string
 }
 
 export interface RouteLeg {
@@ -173,6 +297,10 @@ export interface RouteLeg {
   durationMinutes: number
   mode: 'walk' | 'transit' | 'bicycling'
   estimated?: boolean
+  fallbackReason?: string
+  samePlaceTransfer?: boolean
+  estimatedDepartureAt?: string
+  estimatedArrivalAt?: string
 }
 
 export type StateEventType =
@@ -239,6 +367,7 @@ export interface PlanningResult {
   sections?: ContentSection[]
   comparison?: RouteComparison
   socialCopy?: SocialCopyResult
+  skillExecutions?: AgentSkillExecution[]
   sources?: InformationSource[]
   routeOverview?: RouteOverview
   totalEstimatedCost: number
@@ -275,6 +404,9 @@ export interface PlanningResult {
 
 export interface PlanRequest {
   task?: string
+  attachments?: string[]
+  activeSkillIds?: string[]
+  activeSkills?: AgentSkillInput[]
   city?: string
   startPoint?: string
   durationMinutes?: number
@@ -285,6 +417,9 @@ export interface PlanRequest {
   experience?: RouteExperienceConstraints
   style?: StyleIntentInput
   styleDescription?: string
+  discoveryMode?: PlaceDiscoveryMode
+  discoveryPolicy?: PlaceDiscoveryPolicyInput
+  temporal?: TravelTemporalInput
   transportMode?: 'walk' | 'transit' | 'mixed'
   weatherPreference?: 'avoid_rain' | 'indoor_first' | 'outdoor_ok'
   weatherRisk?: 'low' | 'medium' | 'high'
@@ -294,6 +429,56 @@ export interface PlanRequest {
   preferredModel?: 'flash' | 'pro'
   userId?: string
   threadId?: string
+}
+
+export type WalkAdjustmentReason = 'tired' | 'time_short' | 'rain' | 'crowded' | 'rest' | 'restroom' | 'custom' | 'deviation'
+export interface WalkRouteRevision {
+  id: string
+  reason: WalkAdjustmentReason
+  reasonLabel: string
+  summary: string
+  adjustedAt: string
+  completedStopNames: string[]
+  retainedStopNames: string[]
+  removedStopNames: string[]
+  addedStopNames: string[]
+  remainingMinutes: number
+  warnings: string[]
+}
+export interface WalkAdjustmentRequest {
+  route: PlanningResult
+  reason: WalkAdjustmentReason
+  visitedStopNames: string[]
+  skippedStopNames?: string[]
+  currentLocation?: { lng: number; lat: number; accuracy?: number }
+  remainingMinutes?: number
+  customRequest?: string
+}
+export interface WalkAdjustmentResponse { route: PlanningResult; revision: WalkRouteRevision }
+
+export interface WalkSyncSession<T> {
+  walk: T
+  version: number
+  updatedAt: string
+}
+
+export type WalkBehaviorEventType =
+  | 'walk_started' | 'moment_added' | 'stop_completed' | 'stop_skipped'
+  | 'route_adjusted' | 'route_adjustment_undone' | 'walk_finished'
+
+export interface WalkBehaviorEvent {
+  eventId: string
+  walkId: string
+  eventType: WalkBehaviorEventType
+  payload: Record<string, unknown>
+  createdAt: string
+}
+
+export class WalkSyncConflictError<T> extends Error {
+  constructor(readonly session: WalkSyncSession<T>) {
+    super('其他设备已更新这段漫步')
+    this.name = 'WalkSyncConflictError'
+  }
 }
 
 // ─── API Fetch Helpers ───────────────────────────────────────────────────────
@@ -320,6 +505,122 @@ export async function apiCreatePlan(req: PlanRequest): Promise<PlanningResult> {
 
 export async function apiCreateTrace(req: PlanRequest): Promise<{ trace: AgentTrace }> {
   return request<{ trace: AgentTrace }>('/api/agent/trace', req)
+}
+
+async function requestWithMethod<T>(path: string, method: 'PATCH' | 'DELETE', body?: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method,
+    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(`[${res.status}] ${await res.text().catch(() => res.statusText)}`)
+  return res.status === 204 ? undefined as T : await res.json() as T
+}
+
+export async function apiListSkills(): Promise<AgentSkill[]> {
+  const res = await fetch(`${BASE}/api/skills`, { credentials: 'include' })
+  if (!res.ok) throw new Error(`[${res.status}] ${await res.text().catch(() => res.statusText)}`)
+  const payload = await res.json() as { entries?: AgentSkill[]; skills?: AgentSkill[] }
+  return payload.entries ?? payload.skills ?? []
+}
+
+export async function apiCreateSkill(input: Omit<AgentSkill, 'userId' | 'createdAt' | 'updatedAt' | 'version'> & { id?: string; version?: number }): Promise<AgentSkill> {
+  return request<AgentSkill>('/api/skills', input)
+}
+
+export async function apiUpdateSkill(id: string, patch: Partial<AgentSkill>): Promise<AgentSkill> {
+  return requestWithMethod<AgentSkill>(`/api/skills/${encodeURIComponent(id)}`, 'PATCH', patch)
+}
+
+export async function apiDeleteSkill(id: string): Promise<void> {
+  return requestWithMethod<void>(`/api/skills/${encodeURIComponent(id)}`, 'DELETE')
+}
+
+export async function apiAdjustWalkRoute(input: WalkAdjustmentRequest): Promise<WalkAdjustmentResponse> {
+  const route = {
+    ...input.route,
+    events: undefined,
+    trace: undefined,
+    memory: undefined,
+    planSteps: undefined
+  }
+  return request<WalkAdjustmentResponse>('/api/walks/adjust', { ...input, route })
+}
+
+export async function apiGetActiveWalk<T>(): Promise<{ session: WalkSyncSession<T> | null }> {
+  const res = await fetch(`${BASE}/api/walks/active`, { credentials: 'include' })
+  if (!res.ok) throw new Error('无法读取云端漫步记录')
+  return res.json()
+}
+
+export async function apiSaveActiveWalk<T>(walk: T, baseVersion?: number): Promise<{ session: WalkSyncSession<T> }> {
+  const res = await fetch(`${BASE}/api/walks/active`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ walk, baseVersion })
+  })
+  if (res.status === 409) {
+    const conflict = await res.json() as { session: WalkSyncSession<T> }
+    throw new WalkSyncConflictError(conflict.session)
+  }
+  if (!res.ok) {
+    const payload = await res.json().catch(() => undefined) as { message?: string } | undefined
+    throw new Error(payload?.message || '漫步记录同步失败')
+  }
+  return res.json()
+}
+
+export async function apiFinishActiveWalk(walkId: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/walks/active/${encodeURIComponent(walkId)}/finish`, {
+    method: 'POST', credentials: 'include'
+  })
+  if (!res.ok) throw new Error('云端漫步结束状态同步失败')
+}
+
+export async function apiRecordWalkEvent(event: WalkBehaviorEvent): Promise<void> {
+  await request('/api/walks/events', event)
+}
+
+export interface MobileRouteHandoff {
+  id: string
+  route: PlanningResult
+  source: 'web' | 'mobile' | 'demo'
+  createdAt: string
+  claimedAt?: string
+}
+
+export async function apiGetMobileRouteHandoff(): Promise<{ handoff: MobileRouteHandoff | null }> {
+  const res = await fetch(`${BASE}/api/walks/handoff`, { credentials: 'include' })
+  if (!res.ok) throw new Error('无法读取手机路线接力状态')
+  return res.json()
+}
+
+export async function apiSendRouteToMobile(route: PlanningResult): Promise<{ handoff: MobileRouteHandoff }> {
+  const cleanRoute = { ...route, events: undefined, trace: undefined, memory: undefined, planSteps: undefined }
+  const res = await fetch(`${BASE}/api/walks/handoff`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ route: cleanRoute, source: 'web' })
+  })
+  if (!res.ok) {
+    const payload = await res.json().catch(() => undefined) as { message?: string } | undefined
+    throw new Error(payload?.message || '路线发送到手机失败')
+  }
+  return res.json()
+}
+
+export async function apiListSyncedJournals<T>(): Promise<{ entries: T[]; total: number }> {
+  const res = await fetch(`${BASE}/api/journals`, { credentials: 'include' })
+  if (!res.ok) throw new Error('无法读取移动端路线手账')
+  return res.json()
+}
+
+export async function apiDeleteSyncedJournal(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/journals/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' })
+  if (!res.ok && res.status !== 404) throw new Error('云端手账删除失败')
 }
 
 // ─── History ─────────────────────────────────────────────────────────────────
@@ -424,6 +725,7 @@ export interface JournalLayoutRequest {
   routeStops?: string[]
   currentRecipes?: JournalLayoutRecipe[]
   currentPlacements?: JournalBlockPlacement[]
+  narrativeMode?: 'freeform' | 'route-journey'
   images?: Array<{ blockId: string; imageUrl: string }>
   blocks: Array<{
     id: string
@@ -434,6 +736,9 @@ export interface JournalLayoutRequest {
     placeName?: string
     aspectRatio?: number
     orientation?: 'portrait' | 'landscape' | 'square'
+    journeyOrder?: number
+    journeyMomentId?: string
+    journeyBranch?: boolean
   }>
 }
 
@@ -472,11 +777,12 @@ export interface JournalIllustrationRequest {
   sourceImage: string
   blockId: string
   photoId: string
-  mode?: 'distilled-contour' | 'gathered-collage'
+  mode?: 'distilled-contour'
   title?: string
   text?: string
   placeName?: string
   city?: string
+  stylePresetId?: 'scene-distillation' | 'solid-color-block'
   /** Open-ended natural language; UI presets are shortcuts, not an enum contract. */
   styleDescription?: string
 }
@@ -491,7 +797,7 @@ export interface JournalIllustrationResponse {
   mode: 'distilled-contour' | 'gathered-collage'
   workflow: {
     skill: string
-    version: 'v1.3'
+    version: 'v1.3' | 'v0.1'
     visionUsed: boolean
     visionModel?: string
     summary: string

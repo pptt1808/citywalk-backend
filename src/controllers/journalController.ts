@@ -6,7 +6,8 @@ import { journalAssetStore } from "../services/journalAssetStore";
 import { JournalIllustrationError, journalIllustrationService } from "../services/journalIllustrationService";
 import {
   JOURNAL_LAYOUT_RECIPES,
-  JOURNAL_ILLUSTRATION_MODES,
+  JOURNAL_GENERATABLE_ILLUSTRATION_MODES,
+  JOURNAL_GENERATABLE_ILLUSTRATION_STYLE_PRESETS,
   JOURNAL_PHOTO_TREATMENTS,
   JOURNAL_TAPE_POSITIONS,
   JOURNAL_TEXT_PLACEMENTS
@@ -32,6 +33,7 @@ const LayoutRequestSchema = z.object({
   routeStops: z.array(z.string().trim().min(1).max(120)).max(30).optional(),
   currentRecipes: z.array(z.enum(JOURNAL_LAYOUT_RECIPES)).max(30).optional(),
   currentPlacements: z.array(PlacementSchema).max(60).optional(),
+  narrativeMode: z.enum(["freeform", "route-journey"]).optional(),
   images: z.array(z.object({
     blockId: z.string().trim().min(1).max(128),
     imageUrl: z.string().max(800_000).regex(/^data:image\/(?:jpeg|jpg|png|webp);base64,[a-zA-Z0-9+/=]+$/u)
@@ -44,7 +46,10 @@ const LayoutRequestSchema = z.object({
     text: z.string().trim().max(2000).default(""),
     placeName: z.string().trim().max(120).optional(),
     aspectRatio: z.number().positive().max(20).optional(),
-    orientation: z.enum(["portrait", "landscape", "square"]).optional()
+    orientation: z.enum(["portrait", "landscape", "square"]).optional(),
+    journeyOrder: z.number().int().min(0).max(500).optional(),
+    journeyMomentId: z.string().trim().min(1).max(128).optional(),
+    journeyBranch: z.boolean().optional()
   })).min(1).max(60)
 });
 
@@ -52,11 +57,12 @@ const IllustrationRequestSchema = z.object({
   sourceImage: z.string().max(11_000_000).regex(/^data:image\/(?:jpeg|jpg|png|webp);base64,[a-zA-Z0-9+/=]+$/u),
   blockId: z.string().trim().min(1).max(128),
   photoId: z.string().trim().min(1).max(128),
-  mode: z.enum(JOURNAL_ILLUSTRATION_MODES).default("distilled-contour"),
+  mode: z.enum(JOURNAL_GENERATABLE_ILLUSTRATION_MODES).default("distilled-contour"),
   title: z.string().trim().max(160).optional(),
   text: z.string().trim().max(2000).optional(),
   placeName: z.string().trim().max(120).optional(),
   city: z.string().trim().max(80).optional(),
+  stylePresetId: z.enum(JOURNAL_GENERATABLE_ILLUSTRATION_STYLE_PRESETS).optional(),
   styleDescription: z.string().trim().max(300).optional()
 });
 
@@ -72,6 +78,15 @@ export async function generateJournalLayoutHandler(req: Request, res: Response) 
 export async function generateJournalIllustrationHandler(req: Request, res: Response) {
   const parsed = IllustrationRequestSchema.safeParse(req.body);
   if (!parsed.success) {
+    const requestedMode = typeof req.body === "object" && req.body !== null && "mode" in req.body
+      ? (req.body as { mode?: unknown }).mode
+      : undefined;
+    if (requestedMode === "gathered-collage") {
+      return res.status(410).json({
+        code: "ILLUSTRATION_MODE_RETIRED",
+        message: "极简纸刊已下线，请刷新页面后使用场景蒸馏"
+      });
+    }
     return res.status(400).json({ message: "手账插画素材格式不正确", issues: parsed.error.flatten() });
   }
   const controller = new AbortController();

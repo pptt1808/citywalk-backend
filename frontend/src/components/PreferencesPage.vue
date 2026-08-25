@@ -34,6 +34,12 @@ const groupLabels: Record<MemoryKind, { title: string; description: string }> = 
   procedural: { title: '规划习惯', description: 'Agent 在后续路线中会重复采用的规划方法' },
   episodic: { title: '旅程经历', description: '曾经发生过、可能对下一次规划有帮助的经历' }
 }
+const memorySourceLabels: Record<MemoryItem['source'], string> = {
+  user_explicit: '你明确告诉 Agent',
+  user_feedback: '你的明确反馈',
+  system_observed: '多次实际漫步观察',
+  inferred: 'Agent 推断'
+}
 
 function savePreferences() {
   localStorage.setItem(storageKey, JSON.stringify(preferences.value))
@@ -97,7 +103,7 @@ watch(preferences, savePreferences, { deep: true })
         <section v-for="kind in (['semantic', 'procedural', 'episodic'] as MemoryKind[])" :key="kind">
           <header><h4>{{ groupLabels[kind].title }}</h4><span>{{ groupedMemories[kind].length }}</span><p>{{ groupLabels[kind].description }}</p></header>
           <article v-for="memory in groupedMemories[kind]" :key="memory.id">
-            <p>{{ memory.text }}</p><small>{{ Math.round(memory.confidence * 100) }}% 置信度 · {{ new Date(memory.updatedAt).toLocaleDateString('zh-CN') }}</small>
+            <p>{{ memory.text }}</p><small>{{ Math.round(memory.confidence * 100) }}% 置信度 · {{ memorySourceLabels[memory.source] }} · {{ new Date(memory.updatedAt).toLocaleDateString('zh-CN') }}</small>
             <button @click="removeMemory(memory)">让 Agent 忘记</button>
           </article>
           <p v-if="!groupedMemories[kind].length" class="memory-empty">这一层还没有内容</p>

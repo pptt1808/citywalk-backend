@@ -17,7 +17,7 @@ const navigate = inject<NavigateWorkspace>('navigate')!
 const menuOpen = ref(false)
 
 const initials = computed(() => (auth.user.value?.username ?? 'W').slice(0, 2).toUpperCase())
-const pageTitle = computed(() => ({ chat: '对话手账', profile: '旅行者档案', preferences: '个人偏好', scrapbook: '手账书架', walk: '随身记录' })[activePage.value])
+const pageTitle = computed(() => ({ chat: '对话手账', profile: '旅行者档案', preferences: '个人偏好', scrapbook: '手账书架', walk: '手机路线接力' })[activePage.value])
 
 function go(page: WorkspacePage) {
   navigate(page)
@@ -48,7 +48,7 @@ async function logout() {
           <button @click="go('profile')"><PhUserCircle class="menu-icon" :size="21" /><div><strong>个人资料</strong><small>旅行者档案与收藏概览</small></div><PhCaretRight :size="14" /></button>
           <button @click="go('preferences')"><PhSlidersHorizontal class="menu-icon" :size="21" /><div><strong>个人偏好与 Agent 设置</strong><small>记忆、节奏和默认规划方式</small></div><PhCaretRight :size="14" /></button>
           <button @click="go('scrapbook')"><PhBooks class="menu-icon" :size="21" /><div><strong>手账书架</strong><small>编辑、排版与翻阅</small></div><PhCaretRight :size="14" /></button>
-          <button @click="go('walk')"><PhMapPinLine class="menu-icon" :size="21" /><div><strong>随身记录</strong><small>定位、照片与沿途图钉</small></div><PhCaretRight :size="14" /></button>
+          <button @click="go('walk')"><PhMapPinLine class="menu-icon" :size="21" /><div><strong>手机路线接力</strong><small>发送路线并查看漫步状态</small></div><PhCaretRight :size="14" /></button>
           <button class="logout" @click="logout"><PhSignOut :size="16" /> 退出当前账号</button>
         </div>
       </Transition>

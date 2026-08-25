@@ -1,4 +1,5 @@
 import { env } from "../config/env";
+import { TravelTimePrecision } from "../types/plan";
 import { cache } from "../utils/cache";
 import { fetchJsonWithRetry } from "../utils/httpClient";
 
@@ -8,6 +9,11 @@ export interface WeatherContext {
   rainProbability: number;
   risk: "low" | "medium" | "high";
   summary: string;
+  /** Whether this forecast may affect route selection. */
+  decisionUsable?: boolean;
+  forecastKind?: "hourly" | "daily" | "unavailable";
+  targetDate?: string;
+  timeRange?: { start: string; end: string };
   warning?: {
     title: string;
     level: string;
@@ -34,6 +40,14 @@ export interface WeatherContext {
   };
 }
 
+export interface WeatherQuery {
+  departureAt?: string;
+  visitDate?: string;
+  durationMinutes?: number;
+  timezone?: "Asia/Shanghai";
+  precision?: TravelTimePrecision;
+}
+
 function isOutdoorIndexConcern(index: WeatherContext["indices"][number]): boolean {
   return /(?:较?不宜|很强|极强|非常不舒适|炎热|酷热|扬沙|浮尘)/u.test(`${index.category} ${index.text}`);
 }
@@ -56,89 +70,179 @@ export function inferWeatherRisk(
 export class WeatherTool {
   async getRainProbability(city = "", signal?: AbortSignal): Promise<number> {
     if (!city.trim()) return 0;
-    return (await this.getWeatherContext(city, signal)).rainProbability;
+    return (await this.getWeatherContext(city, { departureAt: new Date().toISOString(), precision: "exact" }, signal)).rainProbability;
   }
 
-  async getWeatherContext(city: string, signal?: AbortSignal): Promise<WeatherContext> {
-    const cacheKey = `weather:${city}`;
+  async getWeatherContext(city: string, signal?: AbortSignal): Promise<WeatherContext>;
+  async getWeatherContext(city: string, query: WeatherQuery, signal?: AbortSignal): Promise<WeatherContext>;
+  async getWeatherContext(
+    city: string,
+    queryOrSignal?: WeatherQuery | AbortSignal,
+    maybeSignal?: AbortSignal
+  ): Promise<WeatherContext> {
+    const legacySignal = queryOrSignal && "aborted" in queryOrSignal ? queryOrSignal as AbortSignal : undefined;
+    const query = legacySignal ? undefined : queryOrSignal as WeatherQuery | undefined;
+    const signal = legacySignal ?? maybeSignal;
+    if (!query?.departureAt && !query?.visitDate) {
+      return this.unavailableWeather(city, "未提供出行日期与时间，未使用当前天气替代行程天气");
+    }
+    const departure = query.departureAt ? new Date(query.departureAt) : undefined;
+    if (departure && !Number.isFinite(departure.getTime())) {
+      return this.unavailableWeather(city, "出行时间格式无效，无法匹配天气预报", query.visitDate);
+    }
+    const targetDate = query.visitDate ?? this.shanghaiDate(departure!);
+    const now = new Date();
+    if (departure && departure.getTime() < now.getTime() - 60 * 60_000) {
+      return this.unavailableWeather(city, "计划出发时刻已经过去，未使用当前天气替代", targetDate);
+    }
+    const cacheKey = `weather:${city}:${targetDate}:${query.departureAt?.slice(11, 13) ?? "day"}:${Math.ceil((query.durationMinutes ?? 180) / 60)}`;
     const cached = cache.get<WeatherContext>(cacheKey);
     if (cached) return cached;
 
     if (!env.QWEATHER_KEY) {
       console.warn("[WeatherTool] QWEATHER_KEY not set — weather data unavailable");
-      return { rainProbability: 0, risk: "low", summary: `${city} 天气数据不可用`, indices: [] };
+      return this.unavailableWeather(city, "天气服务未配置，无法查询出行时段天气", targetDate);
     }
 
     try {
       const locationId = await this.lookupLocation(city, signal);
-      const [hourly, warning, indices, airQuality] = await Promise.all([
-        this.fetchQWeather<{ hourly?: Array<{ pop?: string; precip?: string; text?: string }> }>(
-          "https://devapi.qweather.com/v7/weather/24h",
-          { location: locationId }, signal
-        ),
-        this.fetchQWeather<{ warning?: Array<{ title?: string; level?: string; typeName?: string; text?: string }> }>(
-          "https://devapi.qweather.com/v3/warning/now",
-          { location: locationId }, signal
-        ).catch((error) => {
-          if (signal?.aborted) throw error;
-          return { warning: [] };
-        }),
-        this.fetchQWeather<{ daily?: Array<{ name?: string; category?: string; text?: string }> }>(
-          "https://devapi.qweather.com/v7/indices/1d",
-          { location: locationId, type: "1,5,8" }, signal
-        ).catch((error) => {
-          if (signal?.aborted) throw error;
-          return { daily: [] };
-        }),
-        this.getAirQuality(locationId, signal).catch((error) => {
-          if (signal?.aborted) throw error;
-          return undefined;
-        })
-      ]);
-
-      const forecastHours = (hourly.hourly ?? []).slice(0, 8);
-      const popValues = forecastHours.map((item) => Number(item.pop ?? 0)).filter(Number.isFinite);
-      const precipitation = forecastHours.map((item) => Number(item.precip ?? 0));
-      const rainProbability =
-        popValues.length > 0
-          ? Math.max(...popValues)
-          : Math.min(95, Math.round(precipitation.filter((value) => value > 0).length * 12));
-      const activeWarning = warning.warning?.[0];
-      const normalizedIndices = (indices.daily ?? []).map((item) => ({
-        name: item.name ?? "生活指数",
-        category: item.category ?? "未知",
-        text: item.text ?? ""
-      }));
-      const risk = inferWeatherRisk(rainProbability, activeWarning?.level, airQuality?.aqi, normalizedIndices);
-      const outdoorConcerns = normalizedIndices.filter(isOutdoorIndexConcern).slice(0, 2);
-      const rainSummary = rainProbability >= 60
-        ? "降雨风险较高"
-        : rainProbability >= 30 ? "可能有降雨" : "降雨风险较低";
-      const summary = outdoorConcerns.length > 0
-        ? `${city} 未来数小时${rainSummary}；${outdoorConcerns.map((item) => `${item.name}${item.category}`).join("、")}，户外需做好防护`
-        : `${city} 未来数小时${rainProbability >= 30 ? rainSummary : "适合户外漫步"}`;
-
-      const result: WeatherContext = {
-        rainProbability,
-        risk,
-        summary,
-        warning: activeWarning
-          ? {
-              title: activeWarning.title ?? "天气预警",
-              level: activeWarning.level ?? "未知",
-              type: activeWarning.typeName ?? "未知",
-              text: activeWarning.text ?? ""
-            }
-          : undefined,
-        indices: normalizedIndices,
-        airQuality
-      };
+      const deltaHours = departure ? (departure.getTime() - now.getTime()) / 3_600_000 : Number.POSITIVE_INFINITY;
+      const result = departure && deltaHours >= -1 && deltaHours <= 24
+        ? await this.getHourlyTripWeather(city, locationId, departure, query.durationMinutes ?? 180, targetDate, signal)
+        : await this.getDailyTripWeather(city, locationId, targetDate, now, signal);
       cache.set(cacheKey, result, WEATHER_CACHE_TTL);
       return result;
     } catch (error) {
       if (signal?.aborted) throw error;
-      return { rainProbability: 0, risk: "low", summary: `${city} 天气数据不可用`, indices: [] };
+      return this.unavailableWeather(city, "没有获得该出行日期的可靠天气预报", targetDate);
     }
+  }
+
+  private async getHourlyTripWeather(
+    city: string,
+    locationId: string,
+    departure: Date,
+    durationMinutes: number,
+    targetDate: string,
+    signal?: AbortSignal
+  ): Promise<WeatherContext> {
+    type Hour = { fxTime?: string; pop?: string; precip?: string; text?: string; temp?: string };
+    const nearNow = Math.abs(departure.getTime() - Date.now()) <= 6 * 3_600_000;
+    const [hourly, warning, indices, airQuality] = await Promise.all([
+      this.fetchQWeather<{ hourly?: Hour[] }>("https://devapi.qweather.com/v7/weather/24h", { location: locationId }, signal),
+      this.fetchQWeather<{ warning?: Array<{ title?: string; level?: string; typeName?: string; text?: string }> }>(
+        "https://devapi.qweather.com/v3/warning/now", { location: locationId }, signal
+      ).catch((error) => {
+        if (signal?.aborted) throw error;
+        return { warning: [] };
+      }),
+      targetDate === this.shanghaiDate(new Date())
+        ? this.fetchQWeather<{ daily?: Array<{ name?: string; category?: string; text?: string }> }>(
+            "https://devapi.qweather.com/v7/indices/1d", { location: locationId, type: "1,5,8" }, signal
+          ).catch((error) => {
+            if (signal?.aborted) throw error;
+            return { daily: [] };
+          })
+        : Promise.resolve({ daily: [] }),
+      nearNow ? this.getAirQuality(locationId, signal).catch((error) => {
+        if (signal?.aborted) throw error;
+        return undefined;
+      }) : Promise.resolve(undefined)
+    ]);
+    const start = departure.getTime();
+    const end = start + Math.max(60, durationMinutes) * 60_000;
+    let selected = (hourly.hourly ?? []).filter((item) => {
+      const time = item.fxTime ? new Date(item.fxTime).getTime() : Number.NaN;
+      return Number.isFinite(time) && time >= start - 30 * 60_000 && time <= end + 30 * 60_000;
+    });
+    if (!selected.length) {
+      selected = (hourly.hourly ?? []).filter((item) => {
+        const time = item.fxTime ? new Date(item.fxTime).getTime() : Number.NaN;
+        return Number.isFinite(time) && Math.abs(time - start) <= 2 * 3_600_000;
+      }).slice(0, 1);
+    }
+    if (!selected.length) return this.unavailableWeather(city, "逐小时预报尚未覆盖计划出发时段", targetDate);
+    const popValues = selected.map((item) => Number(item.pop ?? 0)).filter(Number.isFinite);
+    const precipitation = selected.map((item) => Number(item.precip ?? 0)).filter(Number.isFinite);
+    const rainProbability = popValues.length
+      ? Math.max(...popValues)
+      : Math.min(95, precipitation.filter((value) => value > 0).length * 20);
+    const activeWarning = warning.warning?.[0];
+    const normalizedIndices = (indices.daily ?? []).map((item) => ({
+      name: item.name ?? "生活指数", category: item.category ?? "未知", text: item.text ?? ""
+    }));
+    const risk = inferWeatherRisk(rainProbability, activeWarning?.level, airQuality?.aqi, normalizedIndices);
+    const conditions = [...new Set(selected.map((item) => item.text).filter(Boolean))].slice(0, 3);
+    const temperatures = selected.map((item) => Number(item.temp)).filter(Number.isFinite);
+    const rangeStart = selected[0].fxTime ?? departure.toISOString();
+    const rangeEnd = selected.at(-1)?.fxTime
+      ? new Date(new Date(selected.at(-1)!.fxTime!).getTime() + 3_600_000).toISOString()
+      : new Date(end).toISOString();
+    const rainSummary = rainProbability >= 60 ? "降雨风险较高" : rainProbability >= 30 ? "可能有降雨" : "降雨风险较低";
+    return {
+      rainProbability,
+      risk,
+      summary: `${city} ${targetDate} 出行时段${conditions.length ? conditions.join("转") : "天气"}，${rainSummary}${temperatures.length ? `，约${Math.min(...temperatures)}–${Math.max(...temperatures)}℃` : ""}`,
+      decisionUsable: true,
+      forecastKind: "hourly",
+      targetDate,
+      timeRange: { start: rangeStart, end: rangeEnd },
+      warning: activeWarning ? {
+        title: activeWarning.title ?? "天气预警",
+        level: activeWarning.level ?? "未知",
+        type: activeWarning.typeName ?? "未知",
+        text: activeWarning.text ?? ""
+      } : undefined,
+      indices: normalizedIndices,
+      airQuality
+    };
+  }
+
+  private async getDailyTripWeather(
+    city: string,
+    locationId: string,
+    targetDate: string,
+    now: Date,
+    signal?: AbortSignal
+  ): Promise<WeatherContext> {
+    const today = this.shanghaiDate(now);
+    const days = Math.round((new Date(`${targetDate}T00:00:00+08:00`).getTime() - new Date(`${today}T00:00:00+08:00`).getTime()) / 86_400_000);
+    if (days < 0) return this.unavailableWeather(city, "出行日期已经过去，无法用于未来路线规划", targetDate);
+    if (days > 6) return this.unavailableWeather(city, "出行日期超出当前七日天气预报范围", targetDate);
+    type Day = { fxDate?: string; textDay?: string; textNight?: string; tempMin?: string; tempMax?: string; precip?: string };
+    const data = await this.fetchQWeather<{ daily?: Day[] }>(
+      "https://devapi.qweather.com/v7/weather/7d", { location: locationId }, signal
+    );
+    const day = data.daily?.find((item) => item.fxDate === targetDate);
+    if (!day) return this.unavailableWeather(city, "天气预报暂未覆盖该出行日期", targetDate);
+    const conditions = [...new Set([day.textDay, day.textNight].filter(Boolean))].join("转");
+    const precipitation = Number(day.precip ?? 0);
+    const rainProbability = /雨|雪|雷/u.test(conditions) ? (precipitation > 0 ? 70 : 50) : precipitation > 0 ? 40 : 10;
+    return {
+      rainProbability,
+      risk: inferWeatherRisk(rainProbability),
+      summary: `${city} ${targetDate} 预计${conditions || "天气情况待更新"}${day.tempMin || day.tempMax ? `，${day.tempMin ?? "?"}–${day.tempMax ?? "?"}℃` : ""}`,
+      decisionUsable: true,
+      forecastKind: "daily",
+      targetDate,
+      indices: []
+    };
+  }
+
+  private unavailableWeather(city: string, reason: string, targetDate?: string): WeatherContext {
+    return {
+      rainProbability: 0,
+      risk: "low",
+      summary: `${city}${targetDate ? ` ${targetDate}` : ""}：${reason}`,
+      decisionUsable: false,
+      forecastKind: "unavailable",
+      targetDate,
+      indices: []
+    };
+  }
+
+  private shanghaiDate(value: Date): string {
+    return new Date(value.getTime() + 8 * 3_600_000).toISOString().slice(0, 10);
   }
 
   async getMinutelyPrecipitation(location: string, signal?: AbortSignal): Promise<WeatherContext["minutely"]> {

@@ -84,10 +84,13 @@ async function main() {
   assert.equal(result.intent.intent, "memory_query");
   assert.equal(result.responseKind, "memory");
 
-  result = await run("根据刚才的路线写三条朋友圈文案");
+  result = await run("根据刚才的路线写朋友圈文案，风格像发给朋友：松弛、具体，不强行升华");
   assert.equal(result.intent.intent, "social_copy");
   assert.equal(result.responseKind, "social_copy");
-  assert.equal(result.socialCopy?.variants.length, 3);
+  assert.equal(result.socialCopy?.variants.length, 2);
+  assert.match(result.socialCopy?.styleProfile?.rawText ?? "", /松弛/u);
+  assert.ok(result.socialCopy?.variants.every((variant) => variant.hashtags.length === 0));
+  assert.deepEqual(result.socialCopy?.variants.map((variant) => variant.tone), ["完整版", "简短版"]);
 
   result = await run("南京从新街口出发，2小时，预算100元，想逛书店和咖啡");
   assert.equal(result.intent.intent, "route_create");
@@ -98,6 +101,23 @@ async function main() {
   assert.ok(result.stops.some((stop) => stop.category === "cafe"));
   assert.ok(result.summary.length < 100);
   assert.ok(calls.includes("get_weather") && calls.includes("search_poi_nearby") && calls.includes("plan_route"));
+
+  const copyUser = `copy_test_${Date.now()}`;
+  const copyThread = `thread_${copyUser}`;
+  historyStore.save(
+    { task: "南京从新街口出发，2小时，预算100元，想逛书店和咖啡", userId: copyUser, threadId: copyThread },
+    result
+  );
+  const routeCopy = await agent.plan({
+    task: "把刚才的计划写成朋友圈文案，风格：清醒克制但有点好笑",
+    userId: copyUser,
+    threadId: copyThread
+  });
+  assert.equal(routeCopy.intent.intent, "social_copy");
+  assert.equal(routeCopy.socialCopy?.basedOnRoute, true, "文案分支必须读取当前会话最近路线");
+  assert.ok(routeCopy.socialCopy?.variants.some((variant) => result.stops.some((stop) => variant.text.includes(stop.name))), "完整版应锚定真实路线，简短版可以保留自然个人表达");
+  assert.ok(routeCopy.socialCopy?.variants.every((variant) => variant.hashtags.length === 0), "朋友圈文案不应机械堆标签");
+  historyStore.list(copyUser, 100, 0).entries.forEach((entry) => historyStore.deleteById(entry.id, copyUser));
 
   const modifyUser = `modify_test_${Date.now()}`;
   const modifyThread = `thread_${modifyUser}`;

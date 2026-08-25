@@ -281,7 +281,14 @@ function cosineSimilarity(left: number[], right: number[]): number {
 }
 
 export function describePoiForStyle(poi: Poi): string {
-  return [poi.name, poi.category, poi.tags?.join("、"), poi.address].filter(Boolean).join("；");
+  return [
+    poi.name,
+    poi.category,
+    poi.subtype,
+    poi.tags?.join("、"),
+    poi.discoveryReasons?.join("；"),
+    poi.address
+  ].filter(Boolean).join("；");
 }
 
 function describeStyleForEmbedding(style: StyleIntent): string {

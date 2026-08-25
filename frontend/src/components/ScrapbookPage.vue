@@ -4,10 +4,11 @@ import {
   PhArrowLeft, PhArrowRight, PhCaretLeft, PhCaretRight, PhCompass,
   PhImage, PhPlus, PhShareNetwork, PhSparkle, PhTrash,
 } from '@phosphor-icons/vue'
-import { apiDeleteJournalIllustration, apiGenerateJournalIllustration, apiGenerateJournalLayout } from '../api/agent'
+import { apiDeleteJournalIllustration, apiGenerateJournalIllustration, apiGenerateJournalLayout, apiSendRouteToMobile } from '../api/agent'
 import type { JournalBlock, JournalBlockPlacement, JournalController, JournalPhoto, JournalStoryDraft } from '../composables/useJournal'
 import type { NavigateWorkspace } from '../workspace'
 import ZineDecorations from './ZineDecorations.vue'
+import JourneyRouteLayer from './JourneyRouteLayer.vue'
 
 interface PendingStory {
   id: string
@@ -17,6 +18,17 @@ interface PendingStory {
   text: string
   placeName: string
 }
+
+interface JourneyPinMeta {
+  order: number
+  number: string
+  label: string
+  branch: boolean
+  located: boolean
+  momentId: string
+}
+
+type IllustrationPresetId = 'scene-distillation' | 'solid-color-block'
 
 const journal = inject<JournalController>('journal')!
 const navigate = inject<NavigateWorkspace>('navigate')!
@@ -36,30 +48,15 @@ const savingStories = ref(false)
 const layoutNotice = ref('')
 const illustrating = ref(false)
 const illustrationTargetId = ref<string | null>(null)
-const illustrationMode = ref<'distilled-contour' | 'gathered-collage'>('distilled-contour')
-const illustrationStyle = ref('轻盈的旅行钢笔淡彩：松弛的手绘线条、透明水彩晕染、少量彩铅纹理、自然纸张颗粒')
+const DISTILLATION_STYLE = '触感平面纸刊插画：干墨、断续轮廓、纸纤维与克制印刷颗粒，所有形式服务于照片关系中发现的表达命题'
+const illustrationStyle = ref(DISTILLATION_STYLE)
+const illustrationPresetId = ref<IllustrationPresetId | undefined>('scene-distillation')
 const illustrationError = ref('')
+let illustrationLayoutRefreshPending = false
 
 const illustrationPresets = [
-  { name: '钢笔淡彩', value: '轻盈的旅行钢笔淡彩：松弛的手绘线条、透明水彩晕染、少量彩铅纹理、自然纸张颗粒' },
-  { name: '彩铅手稿', value: '旅行彩铅手稿：可见的排线和铅笔颗粒、局部未涂满、柔和但清晰的主体轮廓' },
-  { name: '孔版印刷', value: '独立杂志孔版印刷：两到三层克制色彩、轻微套色偏移、粗粝油墨颗粒、手绘轮廓' },
-  { name: '水彩速写', value: '户外旅行水彩速写：自由的湿画法边缘、疏密变化的钢笔线、保留大片纸白和现场感' }
-]
-
-const illustrationModes = [
-  {
-    value: 'distilled-contour' as const,
-    name: '轮廓插画',
-    skill: 'scene-distillation · v1.3',
-    description: '视觉模型先提炼主体事实与情绪，再生成透明的原创轮廓；照片像素不会留在成品中。'
-  },
-  {
-    value: 'gathered-collage' as const,
-    name: '拾景拼贴',
-    skill: 'scenes-gathered · v1.3',
-    description: '保留一个真实照片锚点，把照片里的轮廓与色彩延伸成无外框的纸面插画场。'
-  }
+  { id: 'scene-distillation' as const, name: '场景蒸馏', value: DISTILLATION_STYLE },
+  { id: 'solid-color-block' as const, name: '单色块模式', value: '单色块模式：一整块高饱和色域作为核心空间，其他插画形式全部使用炭黑、石墨与暖灰中性墨色' }
 ]
 
 const entry = computed(() => journal.entries.value.find(item => item.id === selectedId.value) ?? null)
@@ -69,6 +66,58 @@ const currentBlocks = computed(() => {
   if (!entry.value || !currentSpread.value) return []
   const map = new Map(entry.value.blocks.map(block => [block.id, block]))
   return currentSpread.value.blockIds.map(id => map.get(id)).filter((block): block is JournalBlock => Boolean(block))
+})
+const isJourneyNarrative = computed(() => Boolean(entry.value?.journey && entry.value.moments.length))
+const journeySpreadIndices = computed(() => {
+  if (!entry.value?.journey) return []
+  const journeyBlockIds = new Set(entry.value.blocks.filter(block => block.sourceMomentId).map(block => block.id))
+  return entry.value.spreads.flatMap((spread, index) => spread.blockIds.some(id => journeyBlockIds.has(id)) ? [index] : [])
+})
+const journeyHasPrevious = computed(() => journeySpreadIndices.value.some(index => index < pageIndex.value))
+const journeyHasNext = computed(() => journeySpreadIndices.value.some(index => index > pageIndex.value))
+const previousJourneyNumber = computed(() => journeyNumberOnAdjacentSpread('previous'))
+const nextJourneyNumber = computed(() => journeyNumberOnAdjacentSpread('next'))
+const currentVisualDirection = computed(() => {
+  const direction = currentSpread.value?.visualDirection
+  if (!direction || !isJourneyNarrative.value) return direction
+  return { ...direction, decorations: direction.decorations.filter(decoration => decoration.kind !== 'route-line') }
+})
+const journeyRouteNodes = computed(() => currentBlocks.value.flatMap((block, index) => {
+  const pin = journeyPinFor(block)
+  if (!pin) return []
+  const placement = placementFor(block.id)
+  const page = placement?.page ?? (currentBlocks.value.length === 2 ? index === 0 ? 'left' : 'right' : pageIndex.value % 2 ? 'right' : 'left')
+  const localX = placement?.x ?? 10
+  const localY = placement?.y ?? 28 + index * 12
+  return [{
+    blockId: block.id,
+    momentId: pin.momentId,
+    order: pin.order,
+    number: pin.number,
+    label: pin.label,
+    branch: pin.branch,
+    located: pin.located,
+    page,
+    x: (page === 'right' ? 500 : 0) + localX * 5,
+    y: localY * 6.4
+  }]
+}))
+const journeyOverview = computed(() => {
+  const value = entry.value
+  if (!value?.journey) return undefined
+  const firstMoment = value.moments[0]
+  const lastMoment = value.moments[value.moments.length - 1]
+  const routeStops = value.route?.stops ?? []
+  const start = firstMoment?.stopName || value.route?.routeOverview?.startPoint || routeStops[0]?.name || '起点'
+  const end = lastMoment?.stopName || routeStops[routeStops.length - 1]?.name || '终点'
+  const totalMinutes = Math.max(1, Math.round(value.journey.durationMs / 60000))
+  const duration = totalMinutes >= 60 ? `${Math.floor(totalMinutes / 60)}h ${String(totalMinutes % 60).padStart(2, '0')}m` : `${totalMinutes} min`
+  const stops = routeStops.slice(0, 6).map((stop, index) => ({
+    name: stop.name,
+    number: String(index + 1).padStart(2, '0'),
+    recorded: value.moments.some(moment => moment.stopIndex === index || moment.stopName === stop.name)
+  }))
+  return { start, end, duration, count: value.moments.length, stops, hiddenStops: Math.max(0, routeStops.length - stops.length) }
 })
 const illustrationTarget = computed(() => entry.value?.blocks.find(block => block.id === illustrationTargetId.value) ?? null)
 const illustrationTargetPhoto = computed(() => illustrationTarget.value ? photoFor(illustrationTarget.value) : undefined)
@@ -88,6 +137,9 @@ watch(entry, () => {
   pageIndex.value = 0
 })
 watch(totalSpreads, value => { pageIndex.value = Math.min(pageIndex.value, value - 1) })
+watch(generating, value => {
+  if (!value && illustrationLayoutRefreshPending) void runPendingIllustrationLayoutRefresh()
+})
 onBeforeUnmount(cancelPageTurn)
 
 function openBook(id: string) {
@@ -105,6 +157,39 @@ function createBlank() {
 
 function photoFor(block: JournalBlock): JournalPhoto | undefined {
   return entry.value?.photos.find(photo => photo.id === block.photoId)
+}
+
+function journeyPinFor(block: JournalBlock): JourneyPinMeta | undefined {
+  const value = entry.value
+  if (!value?.journey || !block.sourceMomentId) return undefined
+  const order = value.moments.findIndex(moment => moment.id === block.sourceMomentId)
+  if (order < 0) return undefined
+  const moment = value.moments[order]
+  const firstBlock = value.blocks.find(item => item.sourceMomentId === block.sourceMomentId)
+  return {
+    order,
+    number: String(order + 1).padStart(2, '0'),
+    label: moment.stopName || '沿途记录',
+    branch: firstBlock?.id !== block.id,
+    located: Boolean(moment.location),
+    momentId: moment.id
+  }
+}
+
+function journeyNumberOnAdjacentSpread(direction: 'previous' | 'next'): string | undefined {
+  const value = entry.value
+  if (!value) return undefined
+  const candidates = journeySpreadIndices.value.filter(index => direction === 'previous' ? index < pageIndex.value : index > pageIndex.value)
+  const spreadIndex = direction === 'previous' ? candidates[candidates.length - 1] : candidates[0]
+  const spread = value.spreads[spreadIndex]
+  if (!spread) return undefined
+  const blockIds = direction === 'previous' ? [...spread.blockIds].reverse() : spread.blockIds
+  for (const blockId of blockIds) {
+    const block = value.blocks.find(item => item.id === blockId)
+    const pin = block ? journeyPinFor(block) : undefined
+    if (pin) return pin.number
+  }
+  return undefined
 }
 
 function displayedPhotoUrl(photo?: JournalPhoto): string {
@@ -125,7 +210,7 @@ function renderModeFor(photo?: JournalPhoto): 'original-photo' | 'cutout-illustr
 }
 
 function illustrationLabel(photo?: JournalPhoto): string {
-  return illustrationModeFor(photo) === 'gathered-collage' ? 'AI 拾景拼贴' : 'AI 轮廓插画'
+  return illustrationModeFor(photo) === 'gathered-collage' ? 'AI 极简纸刊' : 'AI 场景蒸馏'
 }
 
 function handleDisplayedPhotoError(photo?: JournalPhoto) {
@@ -269,8 +354,11 @@ function openIllustrationComposer(block: JournalBlock) {
   const photo = photoFor(block)
   if (!photo) return
   illustrationTargetId.value = block.id
-  illustrationMode.value = photo.illustration?.mode === 'gathered-collage' ? 'gathered-collage' : 'distilled-contour'
-  illustrationStyle.value = photo.illustration?.styleDescription || illustrationPresets[0].value
+  const savedStyle = photo.illustration?.mode === 'distilled-contour' ? photo.illustration.styleDescription : undefined
+  const matchedPreset = illustrationPresets.find(preset => preset.value === savedStyle)
+  const defaultPreset = illustrationPresets[0]
+  illustrationPresetId.value = matchedPreset?.id ?? (savedStyle ? undefined : defaultPreset.id)
+  illustrationStyle.value = savedStyle || defaultPreset.value
   illustrationError.value = ''
 }
 
@@ -280,8 +368,13 @@ function closeIllustrationComposer() {
   illustrationError.value = ''
 }
 
-function chooseIllustrationPreset(value: string) {
-  illustrationStyle.value = value
+function chooseIllustrationPreset(preset: typeof illustrationPresets[number]) {
+  illustrationPresetId.value = preset.id
+  illustrationStyle.value = preset.value
+}
+
+function markIllustrationStyleCustom() {
+  illustrationPresetId.value = undefined
 }
 
 async function generateIllustration() {
@@ -291,17 +384,19 @@ async function generateIllustration() {
   if (!targetEntry || !block || !photo || illustrating.value) return
   illustrating.value = true
   illustrationError.value = ''
+  let successNotice = ''
   try {
     const previousAssetId = photo.illustration?.assetId
     const result = await apiGenerateJournalIllustration({
       sourceImage: photo.url,
       blockId: block.id,
       photoId: photo.id,
-      mode: illustrationMode.value,
+      mode: 'distilled-contour',
       title: block.title || undefined,
       text: block.text || undefined,
       placeName: block.placeName || undefined,
       city: targetEntry.city || undefined,
+      stylePresetId: illustrationPresetId.value,
       styleDescription: illustrationStyle.value.trim() || undefined
     })
     journal.setPhotoIllustration(targetEntry.id, photo.id, {
@@ -316,13 +411,10 @@ async function generateIllustration() {
     if (previousAssetId && previousAssetId !== result.assetId) void apiDeleteJournalIllustration(previousAssetId)
     illustrationTargetId.value = null
     illustrationError.value = ''
-    await nextTick()
-    await generateLayout()
-    const resultName = result.mode === 'gathered-collage' ? '拾景拼贴' : '透明轮廓插画'
-    layoutNotice.value = result.cached
-      ? `已应用${resultName}并重新组织图文关系；命中缓存，没有新的生图调用`
-      : `已通过 ${result.workflow.skill} ${result.workflow.version} 生成${resultName}；视觉分析${result.workflow.visionUsed ? '已参与' : '本次使用安全卡片'}，原始照片仍保留`
-    window.setTimeout(() => { layoutNotice.value = '' }, 8000)
+    const resultName = '场景蒸馏插画'
+    successNotice = result.cached
+      ? `已应用${resultName}；命中缓存，没有新的生图调用。手账将在后台重新排版`
+      : `已通过 ${result.workflow.skill} ${result.workflow.version} 生成${resultName}；视觉分析${result.workflow.visionUsed ? '已参与' : '本次使用安全卡片'}，手账将在后台重新排版`
   } catch (error) {
     const raw = error instanceof Error ? error.message : '生成失败'
     try {
@@ -334,6 +426,23 @@ async function generateIllustration() {
   } finally {
     illustrating.value = false
   }
+  if (successNotice) {
+    layoutNotice.value = successNotice
+    await nextTick()
+    scheduleIllustrationLayoutRefresh()
+  }
+}
+
+function scheduleIllustrationLayoutRefresh() {
+  illustrationLayoutRefreshPending = true
+  void runPendingIllustrationLayoutRefresh()
+}
+
+async function runPendingIllustrationLayoutRefresh() {
+  if (!illustrationLayoutRefreshPending || generating.value || illustrating.value) return
+  illustrationLayoutRefreshPending = false
+  await generateLayout()
+  if (illustrationLayoutRefreshPending) void runPendingIllustrationLayoutRefresh()
 }
 
 function toggleIllustration(photo: JournalPhoto) {
@@ -387,16 +496,21 @@ async function generateLayout() {
       city: entry.value.city || undefined,
       note: entry.value.note || undefined,
       routeStops: entry.value.selectedStops,
+      narrativeMode: isJourneyNarrative.value ? 'route-journey' : 'freeform',
       currentRecipes: entry.value.spreads.map(spread => spread.recipe),
       currentPlacements: entry.value.spreads.flatMap(spread => spread.placements ?? []),
       images,
       blocks: entry.value.blocks.map(block => {
         const photo = photoMap.get(block.photoId ?? '')
+        const pin = journeyPinFor(block)
         return {
           id: block.id, kind: block.kind, title: block.title, text: block.text,
           renderMode: renderModeFor(photo),
           placeName: block.placeName, aspectRatio: photo?.aspectRatio,
-          orientation: block.kind === 'photo-text' ? orientationFor(photo) : undefined
+          orientation: block.kind === 'photo-text' ? orientationFor(photo) : undefined,
+          journeyOrder: pin?.order,
+          journeyMomentId: pin?.momentId,
+          journeyBranch: pin?.branch
         }
       })
     })
@@ -489,9 +603,9 @@ function clearContent() {
   pageIndex.value = 0
 }
 
-function startEntryWalk() {
+async function startEntryWalk() {
   if (!entry.value?.route) return
-  journal.startWalk(entry.value.route)
+  await apiSendRouteToMobile(entry.value.route)
   navigate('walk')
 }
 </script>
@@ -515,7 +629,7 @@ function startEntryWalk() {
               <em>{{ book.city || 'FOR THE WANDERING SOUL' }}</em>
               <b>{{ new Date(book.createdAt).getFullYear() }}</b>
             </span>
-            <span class="book-caption"><strong>{{ book.title || '空白手账' }}</strong><small>{{ book.blocks.length ? `${book.blocks.length} 组图文 · ${Math.max(1, book.spreads.length)} 个跨页` : '内页空白 · 点击开始书写' }}</small></span>
+            <span class="book-caption"><strong>{{ book.title || '空白手账' }}</strong><small>{{ book.journey ? `${book.moments.length} 枚路线图钉 · ${Math.max(1, book.spreads.length)} 个跨页` : book.blocks.length ? `${book.blocks.length} 组图文 · ${Math.max(1, book.spreads.length)} 个跨页` : '内页空白 · 点击开始书写' }}</small></span>
           </button>
           <button class="delete-book" @click="removeBook(book.id, book.title)"><PhTrash :size="14" /> 删除手账</button>
         </article>
@@ -547,7 +661,8 @@ function startEntryWalk() {
             currentSpread ? `accent-${currentSpread.accent}` : 'accent-cobalt',
             currentSpread?.visualDirection ? `type-${currentSpread.visualDirection.typographyMode}` : 'type-quiet-serif',
             currentSpread?.visualDirection ? `texture-${currentSpread.visualDirection.textureMode}` : 'texture-paper-fibers',
-            anchorPageClass
+            anchorPageClass,
+            { 'journey-narrative': isJourneyNarrative }
           ]"
         >
           <section class="paper-page left-page"><span class="page-count">{{ pageIndex * 2 + 1 }}</span></section>
@@ -557,10 +672,20 @@ function startEntryWalk() {
             <template v-if="currentSpread">
               <span class="zine-texture-layer" aria-hidden="true" />
               <ZineDecorations
-                v-if="currentSpread.visualDirection"
-                :direction="currentSpread.visualDirection"
+                v-if="currentVisualDirection"
+                :direction="currentVisualDirection"
                 :accent="currentSpread.accent"
                 :spread-id="currentSpread.id"
+              />
+              <JourneyRouteLayer
+                v-if="isJourneyNarrative && journeyRouteNodes.length"
+                :nodes="journeyRouteNodes"
+                :accent="currentSpread.accent"
+                :spread-id="currentSpread.id"
+                :has-previous="journeyHasPrevious"
+                :has-next="journeyHasNext"
+                :previous-number="previousJourneyNumber"
+                :next-number="nextJourneyNumber"
               />
               <div :class="['zine-type-layer', `mode-${currentSpread.visualDirection?.typographyMode || 'quiet-serif'}`]" aria-hidden="true">
                 <b class="type-fragment">{{ currentSpread.headline.slice(0, 2) }}</b>
@@ -578,6 +703,18 @@ function startEntryWalk() {
                 <textarea :value="entry.note" aria-label="手账导语" placeholder="写一段整本手账的开场…" @input="updateNote" />
               </div>
 
+              <aside v-if="pageIndex === 0 && journeyOverview" class="journey-overview">
+                <small>ROUTE NARRATIVE · {{ journeyOverview.count }} PINS</small>
+                <strong><i><em>01</em></i>{{ journeyOverview.start }} <span>→</span> {{ journeyOverview.end }}</strong>
+                <p>{{ journeyOverview.duration }} · 按真实记录顺序连接</p>
+                <div v-if="journeyOverview.stops.length" class="journey-stop-strip" aria-label="计划路线与已记录地点">
+                  <span v-for="stop in journeyOverview.stops" :key="`${stop.number}:${stop.name}`" :class="{ recorded: stop.recorded }" :title="stop.recorded ? `${stop.name} · 已记录` : `${stop.name} · 计划经过`">
+                    <i>{{ stop.number }}</i><em>{{ stop.name }}</em>
+                  </span>
+                  <b v-if="journeyOverview.hiddenStops">+{{ journeyOverview.hiddenStops }}</b>
+                </div>
+              </aside>
+
               <div class="block-cluster" :class="[`blocks-${currentBlocks.length}`, { 'ai-geometry': currentSpread.placements?.length }]">
                 <article
                   v-for="(block, index) in currentBlocks"
@@ -589,12 +726,23 @@ function startEntryWalk() {
                     ...placementClasses(block.id),
                     {
                       'cutout-illustration': Boolean(illustrationModeFor(photoFor(block))),
-                      'gathered-collage': illustrationModeFor(photoFor(block)) === 'gathered-collage'
+                      'gathered-collage': illustrationModeFor(photoFor(block)) === 'gathered-collage',
+                      'journey-block': Boolean(journeyPinFor(block)),
+                      'journey-branch': Boolean(journeyPinFor(block)?.branch)
                     }
                   ]"
                   :style="placementStyle(block.id)"
                 >
                   <button class="remove-block" title="删除这组图文" @click="removeBlock(block.id)"><PhTrash :size="13" /></button>
+                  <span
+                    v-if="journeyPinFor(block)"
+                    class="journey-pin"
+                    :class="{ branch: journeyPinFor(block)?.branch, unlocated: !journeyPinFor(block)?.located }"
+                    :title="journeyPinFor(block)?.branch ? '同一记录点的附属照片' : '漫步记录点'"
+                  >
+                    <b><em>{{ journeyPinFor(block)?.number }}</em></b>
+                    <small>{{ journeyPinFor(block)?.branch ? '同站分支' : journeyPinFor(block)?.label }}</small>
+                  </span>
                   <template v-if="photoFor(block)?.illustrationEnabled && photoFor(block)?.illustration">
                     <figure class="cutout-art" :class="{ 'gathered-art': illustrationModeFor(photoFor(block)) === 'gathered-collage' }">
                       <img :src="displayedPhotoUrl(photoFor(block))" :alt="block.title" @error="handleDisplayedPhotoError(photoFor(block))" />
@@ -670,7 +818,7 @@ function startEntryWalk() {
       <footer class="reader-footer">
         <span>{{ pageIndex + 1 }} / {{ totalSpreads }} 个跨页</span>
         <div class="page-dots"><button v-for="index in totalSpreads" :key="index" :class="{ active: pageIndex === index - 1 }" @click="turnPage(index - 1 > pageIndex ? 1 : -1, index - 1)"/></div>
-        <button v-if="entry.route" class="walk-route" @click="startEntryWalk">带着路线再次出发 <PhArrowRight :size="14" /></button>
+        <button v-if="entry.route" class="walk-route" @click="startEntryWalk">发送到手机再次出发 <PhArrowRight :size="14" /></button>
       </footer>
 
       <aside v-if="entry.route" class="place-editor"><span>本书收录地点</span><button v-for="stop in entry.route.stops" :key="stop.name" :class="{ active: entry.selectedStops.includes(stop.name) }" @click="toggleStop(stop.name)">{{ stop.name }}</button></aside>
@@ -724,36 +872,23 @@ function startEntryWalk() {
             <figcaption>{{ illustrationTarget.title || '原始照片' }}</figcaption>
           </figure>
           <div class="illustration-settings">
-            <label><span>生成模式</span></label>
-            <div class="illustration-modes">
-              <button
-                v-for="mode in illustrationModes"
-                :key="mode.value"
-                :class="{ active: illustrationMode === mode.value }"
-                :disabled="illustrating"
-                @click="illustrationMode = mode.value"
-              >
-                <strong>{{ mode.name }}</strong>
-                <small>{{ mode.skill }}</small>
-                <span>{{ mode.description }}</span>
-              </button>
-            </div>
+            <label><span>生成工作流</span></label>
+            <div class="workflow-summary"><strong>场景蒸馏</strong><small>scene-distillation · v1.3</small><span>原照只作语义证据；AI 建立表达命题、中心张力与视觉隐喻，最终只保留原创插画，不含摄影像素。</span></div>
             <label><span>快捷风格</span></label>
             <div class="style-presets">
               <button
                 v-for="preset in illustrationPresets"
-                :key="preset.name"
-                :class="{ active: illustrationStyle === preset.value }"
+                :key="preset.id"
+                :class="{ active: illustrationPresetId === preset.id }"
                 :disabled="illustrating"
-                @click="chooseIllustrationPreset(preset.value)"
+                @click="chooseIllustrationPreset(preset)"
               >{{ preset.name }}</button>
             </div>
             <label>
               <span>风格描述（可以自由修改，不限制为预设）</span>
-              <textarea v-model="illustrationStyle" maxlength="300" :disabled="illustrating" placeholder="例如：香港旧报纸上的黑色钢笔速写，少量暗红色水彩…" />
+              <textarea v-model="illustrationStyle" maxlength="300" :disabled="illustrating" placeholder="例如：香港旧报纸上的黑色钢笔速写，少量暗红色水彩…" @input="markIllustrationStyleCustom" />
             </label>
-            <p class="generation-rule" v-if="illustrationMode === 'distilled-contour'">Distillation Card 会锁定主体数量、姿态、空间关系和最低识别事实；Seedream 只生成原创插画，服务端再移除连通纸白，输出透明 PNG。不会保留照片矩形，也不会生成文字。</p>
-            <p class="generation-rule" v-else>Scene Card 会决定真实照片锚点、源形状抽象、单一强调色与撕边过渡；输出保留暖白负空间的无外框拼贴 PNG。可编辑文字仍由页面独立渲染，不会烘焙进图片。</p>
+            <p class="generation-rule">严格按 scene-distillation-v1.3：横图 5:3、其余 3:5，保留 2-4 个语义锚点并删除 65%-90% 写实细节；最终不保留、裁切或拼贴摄影像素。输入精确词“单色块模式”可启用单一连续色域。</p>
             <p v-if="illustrationError" class="illustration-error" role="alert">{{ illustrationError }}</p>
           </div>
         </div>
@@ -769,11 +904,14 @@ function startEntryWalk() {
 </template>
 
 <style scoped>
+.workflow-summary{display:grid;grid-template-columns:1fr auto;gap:4px 10px;padding:12px 13px;border:1px solid var(--primary);border-radius:3px;background:var(--primary-fixed);box-shadow:inset 0 0 0 1px rgba(146,77,0,.08)}.workflow-summary strong{color:var(--primary);font:750 15px var(--font-display)}.workflow-summary small{align-self:center;color:var(--text-muted);font:8px/1.2 ui-monospace,monospace;letter-spacing:.04em}.workflow-summary span{grid-column:1/-1;color:var(--text-muted);font-size:10px;line-height:1.5}
 .scrapbook-page{flex:1;min-height:0;overflow:auto}.book-library{max-width:1280px;margin:auto;padding:48px clamp(25px,5vw,70px) 90px}.library-heading{display:flex;justify-content:space-between;align-items:flex-end;gap:30px;margin-bottom:48px;padding-bottom:20px;border-bottom:1px dashed var(--border)}.library-heading small{color:var(--primary);font-size:11px;font-weight:900;letter-spacing:.14em}.library-heading h2{color:var(--primary);font:800 clamp(36px,4vw,52px) var(--font-display)}.library-heading p{color:var(--text-muted);font:16px var(--font-display)}.library-heading button,.book-toolbar button{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:9px 13px;border:1px solid var(--primary);border-radius:var(--radius-control);background:var(--primary);color:#fff;font-size:12px;font-weight:800;cursor:pointer}.library-heading button.outline{background:var(--surface);color:var(--primary)}
 .shelf{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:48px 34px;align-items:start;perspective:1400px}.book-item{min-width:0;position:relative}.closed-book{width:100%;min-width:0;border:0;background:transparent;cursor:pointer;text-align:left;position:relative;padding:0 0 48px;filter:drop-shadow(13px 17px 13px rgba(86,67,56,.2));transform-style:preserve-3d;transition:.32s}.closed-book:hover{transform:translateY(-10px) rotateY(-8deg)}.delete-book{display:block;margin:5px auto 0;padding:6px 11px;border:1px solid rgba(147,0,10,.18);border-radius:999px;background:rgba(255,255,255,.55);color:#8b332c;font-size:11px;font-weight:700;cursor:pointer;opacity:.68}.book-item:hover .delete-book{opacity:1;background:#ffdad6}.cover{height:325px;display:block;padding:28px 22px;position:relative;overflow:hidden;border:1px solid rgba(52,23,4,.32);border-radius:4px 15px 12px 4px;background:#a94e0a;color:#fff;box-shadow:inset 12px 0 18px rgba(42,16,0,.22),inset -2px 0 rgba(255,255,255,.2)}.tone-1 .cover{background:#587600}.tone-2 .cover{background:#8a4d0e}.tone-3 .cover{background:#705346}.cover::after{content:'';position:absolute;inset:8px;border:1px solid rgba(255,255,255,.26);border-radius:2px 10px 9px 2px}.cover>small{font-size:9px;font-weight:900;letter-spacing:.13em;opacity:.7}.cover>i{width:67px;height:67px;margin:55px auto 19px;display:grid;place-items:center;border:3px double rgba(255,255,255,.55);border-radius:50%;font-style:normal;transform:rotate(-7deg)}.cover>strong{display:block;color:#fff;text-align:center;font:700 20px/1.25 var(--font-display)}.cover>em{display:block;margin-top:7px;text-align:center;font:14px var(--font-hand);opacity:.74}.cover>b{position:absolute;left:0;right:0;bottom:25px;text-align:center;font-size:10px;letter-spacing:.2em;opacity:.55}.spine{position:absolute;z-index:3;left:-3px;top:2px;width:17px;height:321px;border-radius:4px 0 0 4px;background:rgba(66,24,0,.45);box-shadow:inset -2px 0 rgba(255,255,255,.13)}.pages{position:absolute;z-index:-1;left:10px;right:-5px;top:15px;height:323px;border-radius:3px 14px 13px 3px;background:repeating-linear-gradient(90deg,#fffdf7 0 2px,#ded7ca 2px 3px);transform:translateZ(-8px)}.book-caption{position:absolute;left:6px;right:6px;bottom:0;display:grid;text-align:center;filter:none}.book-caption strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-h);font:700 15px var(--font-display)}.book-caption small{color:var(--text-muted);font-size:11px}.new-book-object{height:325px;border:2px dashed var(--border);border-radius:5px 15px 12px 5px;background:rgba(255,255,255,.3);display:grid;place-items:center;align-content:center;gap:8px;color:var(--text-muted);cursor:pointer;transition:.2s}.new-book-object:hover{border-color:var(--primary);color:var(--primary);transform:translateY(-6px)}.new-book-object strong{font:700 15px var(--font-display)}.new-book-object small{font-size:11px}
 
 .reading{overflow:hidden;background:#34352f}.book-reader{height:100%;display:flex;flex-direction:column;position:relative;overflow:hidden}.book-toolbar{min-height:68px;flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:9px 20px;background:rgba(252,249,240,.96);border-bottom:1px solid var(--border)}.book-toolbar .back-library,.book-toolbar .light,.book-toolbar .clear-content{background:transparent;color:var(--primary)}.toolbar-title{display:grid;margin-left:6px}.toolbar-title small{color:var(--primary);font-size:9px;font-weight:900;letter-spacing:.14em}.toolbar-title strong{font:700 14px var(--font-display)}.toolbar-space{flex:1}.layout-notice{padding:7px 10px;border-radius:999px;background:var(--primary-fixed);color:var(--primary);font-size:11px;font-weight:750}.book-toolbar .delete{background:#ffdad6;color:#93000a;border-color:rgba(147,0,10,.25)}.book-toolbar button:disabled{opacity:.35;cursor:not-allowed}.book-toolbar button.generating{opacity:.72}.book-toolbar button.generating svg{animation:layoutPulse .85s ease-in-out infinite alternate}@keyframes layoutPulse{to{transform:rotate(24deg) scale(1.18);filter:drop-shadow(0 0 4px rgba(255,255,255,.8))}}
 .reader-stage{flex:1;min-height:0;display:grid;grid-template-columns:48px minmax(0,1180px) 48px;align-items:center;justify-content:center;padding:18px clamp(8px,2.5vw,34px);perspective:1800px}.open-book{--zine-accent:#1646d8;--zine-accent-soft:rgba(22,70,216,.12);height:min(74vh,740px);min-height:520px;display:grid;grid-template-columns:1fr 1fr;position:relative;overflow:hidden;transform-style:preserve-3d;filter:drop-shadow(0 24px 32px rgba(0,0,0,.34))}.open-book::after{content:'';position:absolute;z-index:10;left:50%;top:0;bottom:0;width:28px;transform:translateX(-50%);background:linear-gradient(90deg,rgba(86,67,56,.03),rgba(86,67,56,.18),rgba(255,255,255,.5),rgba(86,67,56,.09));pointer-events:none}.accent-cobalt{--zine-accent:#1646d8;--zine-accent-soft:rgba(22,70,216,.12)}.accent-tomato{--zine-accent:#db493a;--zine-accent-soft:rgba(219,73,58,.13)}.accent-pear{--zine-accent:#77a916;--zine-accent-soft:rgba(119,169,22,.14)}.accent-violet{--zine-accent:#7650c7;--zine-accent-soft:rgba(118,80,199,.13)}.accent-lemon{--zine-accent:#d8b900;--zine-accent-soft:rgba(216,185,0,.15)}.accent-cyan{--zine-accent:#008ca6;--zine-accent-soft:rgba(0,140,166,.13)}.paper-page{min-width:0;position:relative;overflow:hidden;padding:42px;background-color:#f4f0e6;background-image:radial-gradient(rgba(72,61,52,.13) .55px,transparent .7px),linear-gradient(93deg,rgba(255,255,255,.18),transparent 42%);background-size:13px 13px,100% 100%;border:1px solid rgba(46,32,23,.2)}.left-page{border-radius:9px 0 0 8px;transform-origin:right center}.right-page{border-radius:0 9px 8px 0;transform-origin:left center}.page-count{position:absolute;bottom:16px;color:rgba(86,67,56,.42);font:11px var(--font-display)}.left-page .page-count{left:22px}.right-page .page-count{right:22px}.spread-layer{position:absolute;z-index:3;inset:0;overflow:hidden;pointer-events:none}.spread-layer input,.spread-layer textarea,.spread-layer button{pointer-events:auto}.spread-heading{position:absolute;z-index:5;right:5%;top:7%;width:26%;display:grid;gap:3px;text-align:right}.spread-heading small{color:#6f675f;font:9px/1.5 ui-monospace,monospace;letter-spacing:.12em;text-transform:uppercase}.spread-heading strong{color:#2e2925;font:700 clamp(17px,2vw,27px)/1.1 var(--font-display)}.spread-heading strong::after{content:'';display:inline-block;width:10px;height:10px;margin-left:8px;background:var(--zine-accent)}.spread-heading p{color:#8a8178;font:10px/1.5 var(--font-sans)}.book-identity{position:absolute;z-index:6;left:5%;top:7%;width:31%;display:grid;gap:7px}.book-identity input,.book-identity textarea{width:100%;border:0;border-bottom:1px solid transparent;outline:0;background:transparent}.book-identity input{color:#332d28;font:720 clamp(20px,2.5vw,34px)/1.08 var(--font-display)}.book-identity textarea{height:48px;resize:none;color:#70665e;font:12px/1.5 var(--font-display)}.book-identity input:focus,.book-identity textarea:focus{border-bottom-color:var(--zine-accent)}
+.journey-overview{position:absolute;z-index:6;left:5%;bottom:5%;width:39%;display:grid;gap:4px;padding-left:40px;color:#62584f}.journey-overview::before{content:'';position:absolute;left:14px;top:8px;bottom:8px;border-left:2px dashed var(--zine-accent);transform:rotate(-4deg)}.journey-overview small{color:var(--zine-accent);font:800 8px/1.4 ui-monospace,monospace;letter-spacing:.12em}.journey-overview strong{display:flex;align-items:center;gap:6px;color:#3d3732;font:650 15px/1.25 var(--font-hand)}.journey-overview strong i{width:25px;height:25px;display:grid;place-items:center;flex:0 0 auto;border-radius:50% 50% 50% 0;background:var(--zine-accent);color:#fff;font:800 8px var(--font-sans);font-style:normal;transform:rotate(-45deg)}.journey-overview strong i em,.journey-pin b em{font-style:normal;transform:rotate(45deg)}.journey-overview strong span{color:var(--zine-accent)}.journey-overview p{color:#82786f;font:9px/1.4 ui-monospace,monospace;letter-spacing:.06em}.journey-block{isolation:isolate}.journey-pin{position:absolute;z-index:11;left:-16px;top:-19px;display:flex;align-items:center;gap:7px;pointer-events:none}.journey-pin b{position:relative;width:32px;height:32px;display:grid;place-items:center;flex:0 0 auto;border-radius:50% 50% 50% 0;background:var(--zine-accent);color:#fff;font:850 9px var(--font-sans);box-shadow:0 0 0 4px #f4f0e6,0 2px 5px rgba(63,48,38,.2);transform:rotate(-45deg)}.journey-pin small{max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 6px;background:rgba(244,240,230,.88);color:#655b53;font:750 8px/1.25 ui-monospace,monospace;letter-spacing:.04em}.journey-pin.branch{left:-11px;top:-13px}.journey-pin.branch b{width:22px;height:22px;background:#f4f0e6;color:var(--zine-accent);border:2px solid var(--zine-accent);box-shadow:0 0 0 3px #f4f0e6}.journey-pin.branch small{color:#8a8178}.journey-pin.unlocated b{background:#f4f0e6;color:var(--zine-accent);border:2px dashed var(--zine-accent)}
+.journey-stop-strip{position:relative;display:flex;align-items:flex-start;gap:0;margin-top:3px;padding-top:2px}.journey-stop-strip::before{content:'';position:absolute;left:8px;right:9px;top:10px;border-top:1px dashed rgba(98,88,79,.35)}.journey-stop-strip>span{position:relative;z-index:1;min-width:0;flex:1;display:grid;justify-items:center;gap:2px}.journey-stop-strip>span i{width:17px;height:17px;display:grid;place-items:center;border:1px dashed #8f857c;border-radius:50%;background:#f4f0e6;color:#8f857c;font:700 6px ui-monospace,monospace;font-style:normal}.journey-stop-strip>span.recorded i{border-style:solid;border-color:var(--zine-accent);background:var(--zine-accent);color:#fff;box-shadow:0 0 0 2px #f4f0e6}.journey-stop-strip>span em{max-width:52px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8a8178;font:7px/1.2 var(--font-hand);font-style:normal}.journey-stop-strip>span.recorded em{color:#504840;font-weight:700}.journey-stop-strip>b{position:relative;z-index:2;align-self:start;margin:2px 0 0 3px;padding:1px 3px;background:#f4f0e6;color:#8a8178;font:7px ui-monospace,monospace}
 .zine-texture-layer{position:absolute;z-index:1;inset:0;pointer-events:none;opacity:.33;mix-blend-mode:multiply}.texture-paper-fibers .zine-texture-layer{background:repeating-linear-gradient(7deg,transparent 0 17px,rgba(86,67,54,.08) 18px,transparent 19px),radial-gradient(ellipse at 28% 65%,rgba(108,85,62,.13),transparent 32%)}.texture-xerox-softness .zine-texture-layer{background:radial-gradient(circle at 20% 32%,rgba(39,36,32,.14) 0 1px,transparent 1.8px),linear-gradient(91deg,transparent 49.5%,rgba(36,32,28,.05) 50%,transparent 50.6%);background-size:9px 11px,100% 100%;filter:contrast(1.6)}.texture-risograph-grain .zine-texture-layer{background-image:radial-gradient(var(--zine-accent-soft) .75px,transparent .9px),radial-gradient(rgba(62,51,43,.09) .65px,transparent .8px);background-position:0 0,3px 2px;background-size:6px 6px,8px 8px;opacity:.48}.texture-letterpress-bleed .zine-texture-layer{box-shadow:inset 0 0 70px rgba(71,52,37,.13);background:repeating-linear-gradient(0deg,transparent 0 26px,rgba(66,48,34,.055) 27px,transparent 28px)}.texture-halftone .zine-texture-layer{background:radial-gradient(circle,rgba(39,34,30,.18) 0 1px,transparent 1.15px);background-size:7px 7px;mask-image:linear-gradient(120deg,#000,transparent 42%,#000)}.texture-scan-noise .zine-texture-layer{background:repeating-linear-gradient(90deg,rgba(52,43,36,.05) 0 1px,transparent 1px 23px),repeating-linear-gradient(0deg,transparent 0 4px,rgba(52,43,36,.035) 5px);filter:contrast(1.7)}
 .zine-type-layer{position:absolute;z-index:3;inset:0;color:#514942;pointer-events:none;mix-blend-mode:multiply}.zine-type-layer>*{position:absolute}.zine-type-layer .type-fragment{display:none;font:800 clamp(74px,10vw,140px)/.75 var(--font-display);letter-spacing:-.12em;opacity:.075}.zine-type-layer .type-index{font:8px/1.45 ui-monospace,monospace;letter-spacing:.16em;text-transform:uppercase;opacity:.68}.zine-type-layer .type-note{display:none;color:var(--zine-accent);font:800 9px/1 ui-monospace,monospace;letter-spacing:.13em}.mode-archive-stack .type-index{display:block;left:3.2%;top:31%;width:150px;transform:rotate(-90deg) translateX(-100%);transform-origin:left top}.mode-archive-stack .type-note{display:block;left:6%;bottom:7%;transform:rotate(-2deg)}.mode-edge-caption .type-index{right:4%;bottom:4%;max-width:38%;text-align:right}.mode-edge-caption .type-note{display:block;left:4%;top:50%;writing-mode:vertical-rl}.mode-fragmented-letters .type-fragment{display:block;right:6%;bottom:7%}.mode-fragmented-letters .type-index{left:5%;bottom:5%}.mode-diagonal-note .type-index{right:6%;bottom:5%}.mode-diagonal-note .type-note{display:block;left:56%;top:18%;transform:rotate(-12deg);border-bottom:2px solid var(--zine-accent);padding-bottom:4px}.mode-quiet-serif .type-index{left:5%;bottom:5%;font-family:var(--font-display);letter-spacing:.08em}.type-fragmented-letters .spread-heading strong{font-family:ui-monospace,monospace;letter-spacing:-.05em}.type-edge-caption .spread-heading{border-right:3px solid var(--zine-accent);padding-right:10px}.type-diagonal-note .spread-heading{transform:rotate(1.2deg)}.type-archive-stack .spread-heading small{writing-mode:vertical-rl;justify-self:end;max-height:80px}
 .block-cluster{position:absolute;z-index:4;display:grid;gap:18px;align-items:start}.zine-block{position:relative;min-width:0;display:grid;grid-template-columns:minmax(110px,1fr) minmax(130px,.85fr);gap:14px;align-items:center;padding:13px;background:rgba(249,247,240,.42);border:0;border-radius:2px 8px 3px 6px;box-shadow:0 1px 0 rgba(72,55,43,.12)}.photo-anchor{min-width:0;position:relative;display:flex;align-items:center;justify-content:center;padding:7px;background:#eee9df;box-shadow:0 5px 14px rgba(47,37,30,.12);isolation:isolate}.photo-anchor::before{content:'';position:absolute;z-index:3;top:-8px;left:34%;width:33%;height:17px;background:rgba(224,211,178,.66);box-shadow:0 1px 2px rgba(53,42,33,.1);transform:rotate(-2.4deg)}.photo-anchor::after{content:'';position:absolute;z-index:2;inset:7px;pointer-events:none;background-image:radial-gradient(rgba(49,40,34,.6) .45px,transparent .7px);background-size:4px 4px;mix-blend-mode:multiply;opacity:.12}.photo-anchor img{display:block;width:auto;height:auto;max-width:100%;max-height:285px;object-fit:contain;filter:none}.photo-portrait .photo-anchor img{max-height:330px}.story-copy{min-width:0;display:grid;gap:6px;padding:7px 9px 5px;background:rgba(248,244,233,.56);box-shadow:0 1px 0 rgba(75,58,45,.1)}.story-copy input,.story-copy textarea{width:100%;border:0;border-bottom:1px solid transparent;outline:0;background:transparent}.story-copy>input:first-child{color:#302b27;font:600 20px/1.15 var(--font-hand)}.story-copy textarea{min-height:68px;resize:vertical;color:#514943;font:500 18px/1.52 var(--font-hand);letter-spacing:.012em}.story-copy .place-input{color:#7e756d;font:9px ui-monospace,monospace;letter-spacing:.08em}.story-copy input:focus,.story-copy textarea:focus{border-bottom-color:var(--zine-accent);background:rgba(255,255,255,.35)}.story-copy.textOnly{grid-column:1/-1}.story-copy.textOnly>input:first-child{font-size:27px}.story-copy.textOnly textarea{min-height:120px;font-size:20px}.remove-block{position:absolute;z-index:8;right:7px;top:7px;width:27px;height:27px;display:grid;place-items:center;border:0;border-radius:50%;background:rgba(45,37,31,.75);color:#fff;cursor:pointer;opacity:0;transition:.18s}.zine-block:hover .remove-block,.remove-block:focus-visible{opacity:1}.color-anchor{position:absolute;z-index:2;width:22px;height:22px;border-radius:50%;background:var(--zine-accent);box-shadow:0 0 0 7px var(--zine-accent-soft)}.archive-mark{position:absolute;color:#797168;font:8px/1.55 ui-monospace,monospace;letter-spacing:.08em}.ai-caption{position:absolute;z-index:5;left:5%;bottom:5%;max-width:38%;color:#59504a;font:500 17px/1.42 var(--font-hand);transform:rotate(-1deg)}
@@ -888,5 +1026,6 @@ function startEntryWalk() {
    text geometry with cutouts, but never receives cutout blend/filter treatment. */
 .open-book .zine-block.gathered-collage{grid-template-columns:minmax(0,1.22fr) minmax(0,.78fr);background:transparent!important}.open-book .gathered-collage .gathered-art{overflow:hidden;background:transparent}.open-book .gathered-collage .gathered-art img{width:100%;height:auto;max-width:100%;max-height:280px;object-fit:contain;filter:none!important;mix-blend-mode:normal!important;opacity:1!important;transform:none!important}.open-book .gathered-collage .floating-story::before{width:52px;height:2px}.open-book .ai-geometry .gathered-collage .gathered-art img{max-height:260px}.blocks-2 .gathered-collage .gathered-art img{max-height:205px}
 @media(max-width:760px){.open-book .block-cluster.ai-geometry .zine-block{grid-template-columns:1fr}.open-book .ai-geometry .zine-block .photo-anchor img{max-height:145px}.open-book .ai-geometry .zine-block .story-copy textarea{max-height:66px}}
+@media(max-width:760px){.journey-pin small{display:none}.journey-overview{left:4%;bottom:4%;width:44%;padding-left:28px}.journey-overview::before{left:8px}.journey-overview strong{font-size:12px}.journey-stop-strip>span em{display:none}}
 @media(prefers-reduced-motion:reduce){.page-turn-sheet,.page-turn-underlay,.turn-paper-light,.open-book.turn-covering>.spread-layer,.open-book.turn-revealing>.spread-layer{animation-duration:.01ms!important;animation-delay:0ms!important}}
 </style>

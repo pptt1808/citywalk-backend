@@ -1,4 +1,4 @@
-export type ConstraintSource = "request" | "current_turn" | "recent_context" | "llm" | "memory" | "derived" | "default";
+export type ConstraintSource = "request" | "current_turn" | "llm" | "skill" | "recent_context" | "memory" | "derived" | "default";
 export type ConstraintPriority = "hard" | "soft";
 
 export type AgentIntent =
@@ -62,9 +62,46 @@ export interface SocialCopyVariant {
   hashtags: string[];
 }
 
+export type SocialCopyPlatform = "moments" | "xiaohongshu" | "weibo" | "caption" | "general";
+export type SocialCopyStyleSource = "default" | "preset" | "custom" | "reference";
+
+export interface SocialCopyStyleProfile {
+  /** User-facing name. Custom natural-language wording is preserved here. */
+  label: string;
+  rawText: string;
+  source: SocialCopyStyleSource;
+  signature: {
+    sentenceRhythm: string;
+    narrativeMove: string;
+    detailLens: string;
+    diction: string;
+    ending: string;
+  };
+  avoidances: string[];
+}
+
 export interface SocialCopyResult {
   variants: SocialCopyVariant[];
   basedOnRoute: boolean;
+  platform?: SocialCopyPlatform;
+  styleProfile?: SocialCopyStyleProfile;
+  /** Present only when a generated candidate had to be replaced by the safe fallback. */
+  generationDiagnostics?: {
+    fallbackTriggered: boolean;
+    fallbackVariants: Array<{
+      variantIndex: number;
+      tone: string;
+      originalText?: string;
+      reasons: string[];
+      fallbackText: string;
+    }>;
+    regeneration?: {
+      attempted: boolean;
+      attempts: number;
+      reasons: string[];
+      exhausted: boolean;
+    };
+  };
 }
 
 export interface IntentResponsePayload {
@@ -79,8 +116,13 @@ export interface IntentResponsePayload {
 
 export interface RouteWeatherSummary {
   summary: string;
-  risk: "low" | "medium" | "high";
+  risk: "low" | "medium" | "high" | "unknown";
   rainProbability: number;
+  /** False when no departure time was supplied or the target is outside the forecast horizon. */
+  decisionUsable?: boolean;
+  forecastKind?: "hourly" | "daily" | "unavailable";
+  targetDate?: string;
+  timeRange?: { start: string; end: string };
   airQuality?: { aqi: number; category: string };
   warning?: string;
   advice: string[];
@@ -97,6 +139,9 @@ export interface RouteOverview {
     totalMinutes: number;
     travelMinutes: number;
     stayMinutes: number;
+    startAt?: string;
+    endAt?: string;
+    precision?: TravelTimePrecision;
   };
   cost: {
     total: number;
@@ -130,6 +175,8 @@ export interface ConstraintLedgerEntry {
   value: unknown;
   source: ConstraintSource;
   priority: ConstraintPriority;
+  sourceId?: string;
+  sourceLabel?: string;
 }
 
 export interface PartyConstraints {
@@ -204,6 +251,77 @@ export interface StyleIntentInput {
   confidence?: number;
 }
 
+export type AgentSkillActivation = "manual" | "recommended";
+export type AgentSkillPriority = "preference" | "requirement";
+
+/** User-authored Agent behavior stored server-side and selected per turn. */
+export interface AgentSkill {
+  id: string;
+  userId: string;
+  name: string;
+  description: string;
+  instruction: string;
+  enabled: boolean;
+  applicableIntents: AgentIntent[];
+  activation: AgentSkillActivation;
+  priority: AgentSkillPriority;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentSkillInput {
+  id: string;
+  name: string;
+  description?: string;
+  instruction: string;
+  priority?: AgentSkillPriority;
+  applicableIntents?: AgentIntent[];
+  version?: number;
+}
+
+export interface AgentSkillExecution {
+  skillId: string;
+  name: string;
+  version: number;
+  status: "applied" | "partially_applied" | "skipped";
+  appliedRules: string[];
+  overriddenRules: string[];
+  unsupportedRules: string[];
+}
+
+export type TravelTimePeriod = "morning" | "afternoon" | "evening" | "night";
+export type TravelTimePrecision = "exact" | "period" | "date_only" | "unspecified";
+
+/**
+ * Absolute travel-time anchor used by weather, arrival scheduling and
+ * multi-turn route modification. The product currently serves mainland-China
+ * AMap routes, so Asia/Shanghai is the supported operational timezone.
+ */
+export interface TravelTemporalConstraint {
+  timezone: "Asia/Shanghai";
+  precision: TravelTimePrecision;
+  visitDate?: string;
+  startTime?: string;
+  departureAt?: string;
+  period?: TravelTimePeriod;
+  sourceText?: string;
+  inferred?: boolean;
+}
+
+export interface TravelTemporalInput {
+  timezone?: "Asia/Shanghai";
+  visitDate?: string;
+  startTime?: string;
+  departureAt?: string;
+  period?: TravelTimePeriod;
+  precision?: TravelTimePrecision;
+  sourceText?: string;
+  inferred?: boolean;
+  /** Internal merge hint: a time-only phrase temporarily used today's date. */
+  dateInferred?: boolean;
+}
+
 export interface UserConstraints {
   city: string;
   startPoint: string;
@@ -215,6 +333,12 @@ export interface UserConstraints {
   experience: RouteExperienceConstraints;
   accessibility: AccessibilityConstraints;
   style: StyleIntent;
+  /** Controls how aggressively the planner looks beyond mainstream map results. */
+  discoveryMode: PlaceDiscoveryMode;
+  /** Orthogonal execution policy. `discoveryMode` remains as a legacy summary. */
+  discoveryPolicy: PlaceDiscoveryPolicy;
+  /** The planned departure date/time; never silently defaults to request time. */
+  temporal: TravelTemporalConstraint;
   constraintLedger: ConstraintLedgerEntry[];
   transportMode?: "walk" | "transit" | "mixed";
   weatherPreference?: "avoid_rain" | "indoor_first" | "outdoor_ok";
@@ -234,6 +358,12 @@ export interface UserConstraints {
 
 export interface PlanRequest {
   task?: string;
+  /** Metadata only; uploaded binary content is handled by dedicated media APIs. */
+  attachments?: string[];
+  /** Skill identity is separate from task so it cannot alter intent routing. */
+  activeSkillIds?: string[];
+  /** Snapshot supplied by trusted clients; authenticated server records remain authoritative when available. */
+  activeSkills?: AgentSkillInput[];
   city?: string;
   startPoint?: string;
   durationMinutes?: number;
@@ -247,6 +377,12 @@ export interface PlanRequest {
   style?: StyleIntentInput;
   /** Raw open-ended style wording from a simple form field. */
   styleDescription?: string;
+  /** reliable = map-only, balanced = web-assisted for styled routes, hidden_gems = actively seek niche places. */
+  discoveryMode?: PlaceDiscoveryMode;
+  /** Advanced clients can control source trust, novelty and exposure avoidance independently. */
+  discoveryPolicy?: PlaceDiscoveryPolicyInput;
+  /** Structured departure time. Natural-language task expressions are also normalized. */
+  temporal?: TravelTemporalInput;
   transportMode?: "walk" | "transit" | "mixed";
   weatherPreference?: "avoid_rain" | "indoor_first" | "outdoor_ok";
   weatherRisk?: "low" | "medium" | "high";
@@ -263,6 +399,10 @@ export interface PlanRequest {
 export interface RouteStop {
   name: string;
   category: PoiCategory;
+  /** Broad operational kind plus an open provider/user-facing subtype. */
+  kind?: PoiKind;
+  subtype?: string;
+  amapTypeCode?: string;
   estimatedCost: number;
   estimatedStayMinutes: number;
   reason: string;
@@ -281,12 +421,23 @@ export interface RouteStop {
   /** Combined lexical/vector/LLM style relevance, normalized to 0..1. */
   styleScore?: number;
   styleConflicts?: string[];
+  /** Where this place was first discovered; coordinates may still be verified by AMap. */
+  discoverySource?: PoiDiscoverySource;
+  verificationStatus?: PoiVerificationStatus;
+  evidenceUrls?: string[];
+  discoveryReasons?: string[];
+  discoveryConfidence?: number;
+  /** CityWalk-specific usefulness, normalized to 0..1. */
+  cityWalkScore?: number;
   /** LLM 生成的费用明细，说明每一项开销来源 */
   costBreakdown?: string;
   /** LLM 生成的亮点描述，一句话说明该地点特色 */
   highlight?: string;
   /** LLM 生成的预约提醒，如"需提前3天在公众号预约"、"免预约直接进入" */
   bookingInfo?: string;
+  /** Estimated schedule generated only when the trip has a departure time. */
+  estimatedArrivalAt?: string;
+  estimatedDepartureAt?: string;
 }
 
 export interface RouteLeg {
@@ -299,9 +450,74 @@ export interface RouteLeg {
   mode: "walk" | "transit" | "bicycling";
   /** True when distance/time comes from a straight-line fallback rather than a routing API. */
   estimated?: boolean;
+  /** Human-readable disclosure when the requested route mode or provider result had to fall back. */
+  fallbackReason?: string;
+  /** The two pins are the same place or adjacent entrances, so no road route is meaningful. */
+  samePlaceTransfer?: boolean;
+  estimatedDepartureAt?: string;
+  estimatedArrivalAt?: string;
 }
 
-export type PoiCategory = "bookstore" | "cafe" | "sight" | "museum" | "mall" | "park" | "restaurant";
+/**
+ * Functional categories remain finite because routing constraints need stable
+ * dwell-time and accessibility behavior.  The open `subtype` and `tags`
+ * fields carry the real-world diversity instead of collapsing every unknown
+ * place into `sight`.
+ */
+export type PoiCategory =
+  | "bookstore"
+  | "cafe"
+  | "sight"
+  | "museum"
+  | "mall"
+  | "park"
+  | "restaurant"
+  | "shop"
+  | "market"
+  | "studio"
+  | "street_scene"
+  | "event";
+
+export type PoiKind = "business" | "culture" | "landscape" | "street_scene" | "event";
+export type PoiDiscoverySource = "amap" | "web" | "curated" | "community" | "user";
+export type PoiVerificationStatus = "verified" | "map_matched" | "unverified";
+export type PlaceDiscoveryMode = "reliable" | "balanced" | "hidden_gems";
+
+/**
+ * Place discovery is intentionally split into independent axes. A user may
+ * request a long-tail place while still requiring map-only verification, or
+ * keep classic landmarks while avoiding overexposed restaurants.
+ */
+export type PlaceDiscoverySourcePolicy = "map_only" | "web_when_relevant" | "web_assisted";
+export type PlaceNoveltyPreference = "mainstream" | "neutral" | "long_tail";
+export type PlaceExposureScope = "all" | PoiCategory;
+export type PlaceExposureStrength = "soft" | "strict";
+
+export interface PlaceDiscoveryPolicy {
+  sourcePolicy: PlaceDiscoverySourcePolicy;
+  noveltyPreference: PlaceNoveltyPreference;
+  avoidOverexposed: boolean;
+  exposureScopes: PlaceExposureScope[];
+  exposureStrength: PlaceExposureStrength;
+}
+
+export interface PlaceDiscoveryPolicyInput {
+  sourcePolicy?: PlaceDiscoverySourcePolicy;
+  noveltyPreference?: PlaceNoveltyPreference;
+  avoidOverexposed?: boolean;
+  exposureScopes?: PlaceExposureScope[];
+  exposureStrength?: PlaceExposureStrength;
+}
+
+/** A place name explicitly extracted from public search evidence. */
+export interface WebDiscoveredPlace {
+  name: string;
+  subtype?: string;
+  tags: string[];
+  evidence: string;
+  sourceUrl: string;
+  confidence: number;
+}
 
 export interface AgentPlanStep {
   id: string;
@@ -362,6 +578,7 @@ export interface PlanningResult {
   sections?: ContentSection[];
   comparison?: RouteComparison;
   socialCopy?: SocialCopyResult;
+  skillExecutions?: AgentSkillExecution[];
   sources?: InformationSource[];
   routeOverview?: RouteOverview;
   totalEstimatedCost: number;

@@ -18,8 +18,11 @@ export function createApp() {
   }));
   app.use(requestContext);
   const defaultJsonParser = express.json({ limit: "100kb" });
-  const hasJournalBodyParser = (requestPath: string) => requestPath === "/api/journal/layout" || requestPath === "/api/journal/illustrations";
-  app.use((req, res, next) => hasJournalBodyParser(req.path) ? next() : defaultJsonParser(req, res, next));
+  const hasDedicatedBodyParser = (requestPath: string) => requestPath === "/api/journal/layout"
+    || requestPath === "/api/journal/illustrations"
+    || requestPath === "/api/walks/active"
+    || requestPath.startsWith("/api/journals/");
+  app.use((req, res, next) => hasDedicatedBodyParser(req.path) ? next() : defaultJsonParser(req, res, next));
   app.use("/api", apiRateLimit);
   app.use("/api", apiRouter);
   app.use("/api", apiNotFoundHandler);

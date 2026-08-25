@@ -9,6 +9,7 @@ const props = defineProps<{
   startLocation?: string
   startName?: string
   currentLocation?: { lng: number; lat: number; accuracy?: number }
+  locationTrail?: Array<{ lng: number; lat: number; recordedAt?: string }>
   momentPins?: Array<{ id: string; lng: number; lat: number; label: string; note?: string }>
 }>()
 
@@ -37,7 +38,7 @@ function escapeHtml(value: unknown): string {
 }
 
 const hasCoordinates = computed(() =>
-  props.stops.some(s => s.location) || !!props.startLocation || !!props.currentLocation
+  props.stops.some(s => s.location) || !!props.startLocation || !!props.currentLocation || Boolean(props.locationTrail?.length)
 )
 
 // ── Amap loader ──
@@ -166,6 +167,28 @@ function renderMap() {
     markers.push(marker)
   })
 
+  // The solid olive line is the user's sampled GPS trail. It is intentionally
+  // separate from the dashed planned route so an in-walk replan never erases
+  // where the user has actually been.
+  const trailPath: [number, number][] = (props.locationTrail ?? [])
+    .filter(point => Number.isFinite(point.lng) && Number.isFinite(point.lat))
+    .map(point => [point.lng, point.lat])
+  if (trailPath.length >= 2) {
+    coords.push(...trailPath)
+    const walkedLine = createPolyline({
+      path: trailPath,
+      strokeColor: '#607348',
+      strokeWeight: 6,
+      strokeOpacity: .88,
+      strokeStyle: 'solid',
+      lineJoin: 'round',
+      lineCap: 'round',
+      zIndex: 85
+    })
+    walkedLine.setMap(mapInstance)
+    markers.push(walkedLine)
+  }
+
   // Live location sits above route and journal pins.
   if (props.currentLocation) {
     const c: [number, number] = [props.currentLocation.lng, props.currentLocation.lat]
@@ -260,7 +283,7 @@ onUnmounted(() => {
   if (mapInstance) { mapInstance.destroy(); mapInstance = null }
 })
 
-watch(() => [props.stops, props.routeLegs, props.startLocation, props.currentLocation, props.momentPins], () => {
+watch(() => [props.stops, props.routeLegs, props.startLocation, props.currentLocation, props.locationTrail, props.momentPins], () => {
   if (mapInstance) {
     renderMap()
     setTimeout(() => mapInstance?.resize?.(), 150)
@@ -283,7 +306,7 @@ watch(() => [props.stops, props.routeLegs, props.startLocation, props.currentLoc
       <span>地图加载失败，请检查网络或 API Key 配置</span>
     </div>
     <div v-else ref="mapContainer" class="map-canvas">
-      <span v-if="routeLegs?.length" class="map-note">虚线为路线示意，距离与耗时来自路径规划结果</span>
+      <span v-if="routeLegs?.length" class="map-note">绿色实线为已走轨迹 · 虚线为剩余路线</span>
     </div>
   </div>
 </template>

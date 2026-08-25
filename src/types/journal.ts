@@ -93,11 +93,34 @@ export interface JournalLayoutBlockInput {
   placeName?: string;
   aspectRatio?: number;
   orientation?: "portrait" | "landscape" | "square";
+  /** Zero-based order of the source walk moment; absent for freeform uploads. */
+  journeyOrder?: number;
+  journeyMomentId?: string;
+  journeyBranch?: boolean;
   visual?: JournalVisualAnalysis;
 }
 
 export const JOURNAL_ILLUSTRATION_MODES = ["distilled-contour", "gathered-collage"] as const;
 export type JournalIllustrationMode = typeof JOURNAL_ILLUSTRATION_MODES[number];
+/** Generation support. gathered-collage remains in the legacy render union so
+ * previously generated journals can still be displayed and deleted. */
+export const JOURNAL_GENERATABLE_ILLUSTRATION_MODES = ["distilled-contour"] as const;
+
+export const JOURNAL_ILLUSTRATION_STYLE_PRESETS = [
+  "scene-distillation",
+  "solid-color-block",
+  "minimal-risograph",
+  "xerox-photo-fragment",
+  "old-print-illustration",
+  "flat-silhouette"
+] as const;
+export type JournalIllustrationStylePreset = typeof JOURNAL_ILLUSTRATION_STYLE_PRESETS[number];
+/** Presets exposed by the active generation workflow. The remaining values are
+ * retained only so old saved requests can still be read safely. */
+export const JOURNAL_GENERATABLE_ILLUSTRATION_STYLE_PRESETS = [
+  "scene-distillation",
+  "solid-color-block"
+] as const;
 
 export interface JournalLayoutRequest {
   title: string;
@@ -106,6 +129,7 @@ export interface JournalLayoutRequest {
   routeStops?: string[];
   currentRecipes?: JournalLayoutRecipe[];
   currentPlacements?: JournalBlockPlacement[];
+  narrativeMode?: "freeform" | "route-journey";
   blocks: JournalLayoutBlockInput[];
   images?: JournalVisionImageInput[];
 }
@@ -149,6 +173,8 @@ export interface JournalIllustrationRequest {
   text?: string;
   placeName?: string;
   city?: string;
+  /** Optional structural shortcut. Free-form styleDescription remains open-ended. */
+  stylePresetId?: JournalIllustrationStylePreset;
   styleDescription?: string;
 }
 
@@ -162,7 +188,7 @@ export interface JournalIllustrationResponse {
   mode: JournalIllustrationMode;
   workflow: {
     skill: string;
-    version: "v1.3";
+    version: "v1.3" | "v0.1";
     visionUsed: boolean;
     visionModel?: string;
     summary: string;

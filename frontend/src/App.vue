@@ -5,7 +5,7 @@ import ChatWorkspace from './components/ChatWorkspace.vue'
 import AuthPanel from './components/AuthPanel.vue'
 import ProfilePage from './components/ProfilePage.vue'
 import ScrapbookPage from './components/ScrapbookPage.vue'
-import WalkRecorder from './components/WalkRecorder.vue'
+import MobileWalkCompanion from './components/MobileWalkCompanion.vue'
 import PreferencesPage from './components/PreferencesPage.vue'
 import { useAgentPlan } from './composables/useAgentPlan'
 import { useAuth } from './composables/useAuth'
@@ -55,7 +55,7 @@ onMounted(async () => {
       <ProfilePage v-else-if="activePage === 'profile'" />
       <PreferencesPage v-else-if="activePage === 'preferences'" />
       <ScrapbookPage v-else-if="activePage === 'scrapbook'" />
-      <WalkRecorder v-else />
+      <MobileWalkCompanion v-else />
     </section>
   </div>
 </template>

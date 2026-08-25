@@ -13,6 +13,7 @@ import {
   IntentResponsePayload,
   InformationSource,
   PartyConstraints,
+  PlaceDiscoveryMode,
   PlanningResult,
   PlanRequest,
   RouteExperienceConstraints,
@@ -33,7 +34,15 @@ import { HistoryEntry, historyStore } from "../services/historyStore";
 import { MapTool, Poi } from "../tools/mapTool";
 import { WeatherContext, WeatherTool } from "../tools/weatherTool";
 import { WebSearchTool, webSearchTool as defaultWebSearchTool } from "../tools/webSearchTool";
+import { PlaceDiscoveryService } from "../services/placeDiscoveryService";
 import { throwIfAborted } from "../utils/httpClient";
+import {
+  buildFallbackSocialCopyResponse,
+  buildSocialCopyBrief,
+  finalizeSocialCopyResponseWithDiagnostics,
+  SocialCopyBrief,
+  SocialCopySemanticReview
+} from "../services/socialCopyService";
 import {
   compileHeuristicStyle,
   emptyStyleIntent,
@@ -43,6 +52,30 @@ import {
   StyleMatcher,
   styleMatcher as defaultStyleMatcher
 } from "../services/styleService";
+import {
+  compileDiscoveryPolicySignals,
+  deriveDiscoveryMode,
+  describeDiscoveryPolicy,
+  discoveryPolicyFromMode,
+  exposurePolicyApplies,
+  hasExplicitDiscoveryPolicySignal,
+  mergeDiscoveryPolicies
+} from "../services/discoveryPolicyService";
+import {
+  describeTravelTemporal,
+  formatShanghaiClock,
+  parseTravelTemporal,
+  resolveTravelTemporal,
+  scheduleRouteByDeparture
+} from "../services/temporalService";
+import { completeRouteLegs } from "../services/routeLegService";
+import {
+  buildSkillExecutions,
+  compileAgentSkills,
+  CompiledAgentSkills,
+  skillPromptContext
+} from "../services/agentSkillService";
+import { skillStore } from "../services/skillStore";
 
 const CityWalkState = Annotation.Root({
   task: Annotation<string>(),
@@ -86,19 +119,29 @@ const CityWalkState = Annotation.Root({
     default: () => []
   }),
   memoryContext: Annotation<MemoryContext | undefined>(),
-  abortSignal: Annotation<AbortSignal | undefined>()
+  abortSignal: Annotation<AbortSignal | undefined>(),
+  skillContext: Annotation<CompiledAgentSkills | undefined>(),
+  skillExecutions: Annotation<ReturnType<typeof buildSkillExecutions>>({
+    reducer: (_left, right) => right,
+    default: () => []
+  })
 });
 
 type CityWalkGraphState = typeof CityWalkState.State;
 
 const POI_CATEGORY_WORDS: Record<RouteStop["category"], readonly string[]> = {
   bookstore: ["书店", "书局"],
-  cafe: ["咖啡", "咖啡店", "咖啡馆"],
-  sight: ["景点", "街区"],
+  cafe: ["咖啡", "咖啡店", "咖啡馆", "甜品", "甜点", "烘焙", "茶馆"],
+  sight: ["景点", "地标"],
   museum: ["博物馆", "美术馆", "展馆"],
   mall: ["商场", "购物中心"],
   park: ["公园", "绿地", "花园"],
-  restaurant: ["餐厅", "饭店", "吃饭", "美食店"]
+  restaurant: ["餐厅", "饭店", "吃饭", "美食店"],
+  shop: ["古着店", "唱片店", "买手店", "花店", "杂货店", "文创店", "二手店", "独立小店"],
+  market: ["市场", "市集", "菜市场", "街市"],
+  studio: ["工作室", "工坊", "手作空间", "独立画廊"],
+  street_scene: ["街区", "街巷", "胡同", "小巷", "街角", "天桥", "步道", "河岸", "建筑立面"],
+  event: ["活动", "展会", "节庆", "快闪", "音乐节"]
 };
 
 /**
@@ -121,23 +164,18 @@ export function extractRouteRemovalTarget(task: string): string {
 }
 type CityWalkGraphUpdate = typeof CityWalkState.Update;
 
-function haversineKm(lng1: number, lat1: number, lng2: number, lat2: number): number {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
 export class CityWalkGraphRunner {
   private readonly llmRouter = new LlmRouter();
+  private readonly placeDiscovery: PlaceDiscoveryService;
 
   constructor(
     private readonly mapTool: MapTool,
     private readonly weatherTool: WeatherTool,
     private readonly styleMatcher: StyleMatcher = defaultStyleMatcher,
     private readonly webSearchTool: WebSearchTool = defaultWebSearchTool
-  ) {}
+  ) {
+    this.placeDiscovery = new PlaceDiscoveryService(this.mapTool, this.webSearchTool, this.llmRouter);
+  }
 
   async run(input: PlanRequest, signal?: AbortSignal): Promise<PlanningResult> {
     // Use the same values stream as SSE. LangGraph's invoke path can retain
@@ -202,7 +240,9 @@ export class CityWalkGraphRunner {
       corrections: [],
       llmModels: [],
       memoryContext: undefined,
-      abortSignal: signal
+      abortSignal: signal,
+      skillContext: undefined,
+      skillExecutions: []
     };
   }
 
@@ -223,6 +263,7 @@ export class CityWalkGraphRunner {
       sections: state.intentResponse?.sections,
       comparison: state.intentResponse?.comparison,
       socialCopy: state.intentResponse?.socialCopy,
+      skillExecutions: state.skillExecutions,
       sources: state.intentResponse?.sources,
       routeOverview,
       totalEstimatedCost: state.totalEstimatedCost,
@@ -338,6 +379,26 @@ export class CityWalkGraphRunner {
     }
     const referenceRoute = historyStore.latestRoute(state.rawInput.userId, state.rawInput.threadId);
     const responseKind = this.responseKindForIntent(classification.intent);
+    const selectedIds = new Set(state.rawInput.activeSkillIds ?? []);
+    const persistedSkills = state.rawInput.userId
+      ? skillStore.getByIds(state.rawInput.userId, [
+        ...(state.rawInput.activeSkillIds ?? []),
+        ...skillStore.list(state.rawInput.userId)
+          .filter((skill) => skill.enabled && skill.activation === "recommended")
+          .map((skill) => skill.id)
+      ])
+      : [];
+    const snapshotSkills = (state.rawInput.activeSkills ?? []).filter((skill) => selectedIds.size === 0 || selectedIds.has(skill.id));
+    // Server-owned records are authoritative. Snapshots are retained only as
+    // a migration/evaluation fallback so an older client can still execute a
+    // skill before its local definition has been synced through /skills.
+    const persistedIds = new Set(persistedSkills.map((skill) => skill.id));
+    const skillInputs = [
+      ...persistedSkills,
+      ...snapshotSkills.filter((skill) => !persistedIds.has(skill.id))
+    ];
+    const skillContext = compileAgentSkills(skillInputs, classification.intent);
+    const skillExecutions = buildSkillExecutions(skillContext);
     const content = `识别用户意图为 ${classification.intent}（置信度 ${classification.confidence.toFixed(2)}）：${classification.reason}`;
     const event = this.event("THINK", content, state, "classify_intent");
     event.context_snapshot = {
@@ -352,7 +413,9 @@ export class CityWalkGraphRunner {
       events: [event],
       traceSteps: [{ type: "thought", content }],
       decisionLog: [content],
-      llmModels: model ? [model] : []
+      llmModels: model ? [model] : [],
+      skillContext,
+      skillExecutions
     };
   }
 
@@ -383,7 +446,9 @@ export class CityWalkGraphRunner {
       && !/改|换|删|加|调整|优化/.test(normalized)) {
       return classify("history_query", 0.96, "用户正在查询已经生成过的路线记录");
     }
-    if (/(比较|对比|区别|哪条更好|哪个好|怎么选).{0,30}(路线|行程|方案)|(?:路线|行程|方案).{0,30}(比较|对比|区别|哪条更好|哪个好|怎么选)/.test(normalized)) {
+    if ((/(比较|对比|区别|哪条更好|哪个好|怎么选)/.test(normalized)
+      && /(路线|行程|方案)/.test(normalized))
+      || /(比较|对比|区别|哪条更好|哪个好|怎么选).{0,30}(路线|行程|方案)|(?:路线|行程|方案).{0,30}(比较|对比|区别|哪条更好|哪个好|怎么选)/.test(normalized)) {
       return classify("route_compare", 0.97, "用户要求比较多个路线或行程方案");
     }
     if (/(上一条|刚才|原来|之前|这条|现有).{0,12}(路线|行程).{0,20}(改|换|删|加|调整|缩短|延长|优化)|(?:把|将)?(?:原有|原来|当前|现有|这条)?(?:路线|行程).{0,16}(?:改|调整|优化|修改|替换|删除|增加|换掉|缩短|延长)|(?:改|调整|优化|修改|替换|删除|增加|换掉).{0,16}(路线|行程|上一站|地点|终点|咖啡|书店|公园|博物馆|景点|商场)/.test(normalized)) {
@@ -562,7 +627,12 @@ export class CityWalkGraphRunner {
       return {
         title: `${state.rawInput.city ?? this.matchCity(state.task) ?? "当地"}天气`,
         answer: weather.summary,
-        sections: [{ title: "出行参考", items: [`降雨概率 ${weather.rainProbability}%`, `风险等级：${weather.risk}`, weather.airQuality ? `空气质量：AQI ${weather.airQuality.aqi}（${weather.airQuality.category}）` : "暂无空气质量数据", weather.warning ? `${weather.warning.title}：${weather.warning.text}` : "当前无天气预警"] }]
+        sections: [{ title: "出行参考", items: [
+          weather.decisionUsable === false ? "当前没有可匹配该行程的天气数据" : `降雨概率 ${weather.rainProbability}%`,
+          `风险等级：${weather.decisionUsable === false ? "未知" : weather.risk}`,
+          weather.airQuality ? `空气质量：AQI ${weather.airQuality.aqi}（${weather.airQuality.category}）` : "暂无对应时段空气质量数据",
+          weather.warning ? `${weather.warning.title}：${weather.warning.text}` : "暂无对应时段天气预警"
+        ] }]
       };
     }
     if (intent === "info_query" && facts.poiDetails) {
@@ -600,18 +670,9 @@ export class CityWalkGraphRunner {
       };
     }
     if (intent === "social_copy") {
-      const names = state.referenceRoute?.result.stops.map((stop) => stop.name).slice(0, 4) ?? [];
-      const routeText = names.length ? names.join("、") : "今天走过的街巷";
-      return {
-        title: "CityWalk 分享文案",
-        answer: names.length ? "已基于最近路线生成 3 个不同语气的版本。" : "没有找到最近路线，以下文案未写入具体地点。",
-        sections: [],
-        socialCopy: { basedOnRoute: names.length > 0, variants: [
-          { tone: "简洁", text: `${routeText}，把城市重新走了一遍。`, hashtags: ["CityWalk", "城市漫游"] },
-          { tone: "轻松", text: `今日份不赶路：在${routeText}慢慢走，刚好遇见城市可爱的一面。`, hashtags: ["周末去哪儿", "CityWalk"] },
-          { tone: "记录感", text: `路线不必很远，${routeText}已经装下今天的风景。`, hashtags: ["城市散步", "生活碎片"] }
-        ] }
-      };
+      return buildFallbackSocialCopyResponse(
+        buildSocialCopyBrief(state.task, state.referenceRoute?.result)
+      );
     }
     if (intent === "route_compare") {
       return { title: "路线比较", answer: "可以比较，但目前缺少两条路线的完整信息。请提供路线 A、路线 B 的站点，或先在当前会话生成路线。", sections: [], comparison: { dimensions: [], options: [], recommendation: "", missingInformation: ["至少两条候选路线", "各路线的站点或时间费用信息"] } };
@@ -639,6 +700,7 @@ export class CityWalkGraphRunner {
     const events: StateEvent[] = [];
     const traceSteps: TraceStep[] = [];
     let toolFacts: unknown;
+    let socialCopyBrief: SocialCopyBrief | undefined;
 
     if (intent === "memory_query") {
       const response = this.buildMemoryResponse(state);
@@ -675,12 +737,30 @@ export class CityWalkGraphRunner {
     const city = this.normalizeCityName(
       state.rawInput.city ?? this.matchCity(state.task) ?? state.referenceRoute?.result.constraints.city
     ) ?? "当地";
+    if (intent === "social_copy") {
+      socialCopyBrief = buildSocialCopyBrief(state.task, state.referenceRoute?.result);
+      toolFacts = { socialCopyBrief };
+      traceSteps.push({ type: "tool_result", tool: "social_copy_brief", output: socialCopyBrief });
+    }
     if (intent === "info_query" && /天气|下雨|降雨|空气|预警/.test(state.task)) {
-      const action = this.event("ACTION", `查询${city}天气事实。`, state, "intent_weather", { tool: "get_weather", input: { city } });
-      const weather = await this.weatherTool.getWeatherContext(city, state.abortSignal);
-      const obs = this.event("OBS", weather.summary, state, "intent_weather", { tool: "get_weather", input: { city }, output: weather });
+      const parsedTemporal = resolveTravelTemporal(state.rawInput.temporal, parseTravelTemporal(state.task));
+      // A standalone “天气怎么样” conventionally asks about now. Route
+      // creation does not use this default and requires an explicit trip time.
+      const temporal = parsedTemporal.precision === "unspecified"
+        ? resolveTravelTemporal({ departureAt: new Date().toISOString(), precision: "exact", sourceText: "当前天气查询" })
+        : parsedTemporal;
+      const input = { city, temporal };
+      const action = this.event("ACTION", `查询${city}天气事实。`, state, "intent_weather", { tool: "get_weather", input });
+      const weather = await this.weatherTool.getWeatherContext(city, {
+        departureAt: temporal.departureAt,
+        visitDate: temporal.visitDate,
+        durationMinutes: state.rawInput.durationMinutes,
+        timezone: temporal.timezone,
+        precision: temporal.precision
+      }, state.abortSignal);
+      const obs = this.event("OBS", weather.summary, state, "intent_weather", { tool: "get_weather", input, output: weather });
       events.push(action, obs);
-      traceSteps.push({ type: "tool_call", tool: "get_weather", input: { city } }, { type: "tool_result", tool: "get_weather", output: weather });
+      traceSteps.push({ type: "tool_call", tool: "get_weather", input }, { type: "tool_result", tool: "get_weather", output: weather });
       toolFacts = { weather };
     }
     if (intent === "info_query" && !/天气|下雨|降雨|空气|预警/.test(state.task)) {
@@ -734,16 +814,35 @@ export class CityWalkGraphRunner {
       const styleHints = compileHeuristicStyle(state.task).searchHints;
       const keywords = [...new Set([...this.matchExplicitPreferences(state.task), ...styleHints])];
       if (!keywords.length) keywords.push(state.task.replace(/[？?。]/g, "").slice(0, 40));
-      const input = { city, startPoint, location, keywords };
+      const discoveryPolicy = mergeDiscoveryPolicies(
+        state.rawInput.discoveryPolicy,
+        discoveryPolicyFromMode(state.rawInput.discoveryMode),
+        compileDiscoveryPolicySignals(state.task),
+        discoveryPolicyFromMode(this.matchDiscoveryMode(state.task))
+      );
+      const discoveryMode = deriveDiscoveryMode(discoveryPolicy);
+      const input = { city, startPoint, location, keywords, discoveryMode, discoveryPolicy };
       const action = this.event("ACTION", "按地点发现意图搜索 POI，不生成完整路线。", state, "poi_discovery", {
         tool: location ? "search_poi_nearby" : "search_poi", input
       });
-      const pois = await this.mapTool.searchNearbyPoi(keywords, { city, location, radius: 5000, signal: state.abortSignal });
+      const discovery = await this.placeDiscovery.discover({
+        city,
+        task: state.task,
+        keywords,
+        location,
+        radius: 5000,
+        mode: discoveryMode,
+        policy: discoveryPolicy,
+        preferredModel: state.rawInput.preferredModel,
+        signal: state.abortSignal
+      });
+      const pois = discovery.pois;
       const facts = pois.slice(0, 12).map((poi) => ({
-        name: poi.name, category: poi.category, address: poi.address, rating: poi.rating,
-        distanceMeters: poi.distanceMeters, averageCost: poi.averageCost
+        name: poi.name, category: poi.category, subtype: poi.subtype, address: poi.address, rating: poi.rating,
+        distanceMeters: poi.distanceMeters, averageCost: poi.averageCost, discoverySource: poi.discoverySource,
+        verificationStatus: poi.verificationStatus, discoveryReasons: poi.discoveryReasons
       }));
-      const obs = this.event("OBS", `找到 ${facts.length} 个地点候选。`, state, "poi_discovery", {
+      const obs = this.event("OBS", `找到 ${facts.length} 个地点候选；公开网页发现 ${discovery.webMatchedCount} 个并已完成地图匹配。`, state, "poi_discovery", {
         tool: location ? "search_poi_nearby" : "search_poi", input, output: facts
       });
       events.push(action, obs);
@@ -751,7 +850,7 @@ export class CityWalkGraphRunner {
         { type: "tool_call", tool: location ? "search_poi_nearby" : "search_poi", input },
         { type: "tool_result", tool: location ? "search_poi_nearby" : "search_poi", output: facts }
       );
-      toolFacts = { city, startPoint, pois: facts };
+      toolFacts = { city, startPoint, pois: facts, webSources: discovery.sources };
     }
     if (intent === "navigation_query") {
       const points = this.matchNavigationPoints(state.task);
@@ -783,29 +882,101 @@ export class CityWalkGraphRunner {
     if (intent === "route_review") {
       toolFacts = state.referenceRoute ? this.compactReferenceRoute(state.referenceRoute) : undefined;
     }
+    if (intent === "route_review" || intent === "route_compare") {
+      traceSteps.push({
+        type: "tool_result",
+        tool: "analysis_context",
+        output: toolFacts ?? { task: state.task, note: "本轮未附带结构化路线事实" }
+      });
+    }
 
     const referenceRoute = state.referenceRoute ? this.compactReferenceRoute(state.referenceRoute) : undefined;
     let response: IntentResponsePayload | undefined;
     let model: string | undefined;
+    let socialCopySemanticReview: SocialCopySemanticReview | undefined;
+    let socialCopyOriginalCandidates: Array<{ variantIndex: number; text: string }> | undefined;
+    let socialCopyRegeneration: {
+      attempted: boolean;
+      attempts: number;
+      reasons: string[];
+      exhausted: boolean;
+    } | undefined;
     try {
-      const llm = await this.llmRouter.respondToIntent(
-        intent as Exclude<AgentIntent, "route_create" | "route_modify" | "memory_query">,
-        state.task,
-        {
-          conversation: memoryService.buildPromptContext(state.memoryContext),
-          referenceRoute,
-          toolFacts
-        },
-        state.rawInput.preferredModel,
-        state.abortSignal
-      );
-      response = llm?.data;
-      if (llm) model = `${llm.provider}:${llm.model}`;
+      if (socialCopyBrief) {
+        const llm = await this.llmRouter.generateSocialCopy(
+            state.task,
+            socialCopyBrief,
+            {
+              conversation: [memoryService.buildPromptContext(state.memoryContext), state.skillContext ? skillPromptContext(state.skillContext) : undefined]
+                .filter((item): item is string => Boolean(item)).join("\n") || undefined,
+              referenceRoute
+            },
+            state.rawInput.preferredModel,
+            state.abortSignal
+          );
+        response = llm?.data;
+        socialCopySemanticReview = llm?.semanticReview;
+        socialCopyOriginalCandidates = llm?.originalCandidates;
+        socialCopyRegeneration = llm?.regeneration;
+        if (llm) model = `${llm.provider}:${llm.model}`;
+      } else {
+        const llm = await this.llmRouter.respondToIntent(
+            intent as Exclude<AgentIntent, "route_create" | "route_modify" | "memory_query">,
+            state.task,
+            {
+              conversation: memoryService.buildPromptContext(state.memoryContext),
+              referenceRoute,
+              toolFacts,
+              skillContext: state.skillContext ? skillPromptContext(state.skillContext) : undefined
+            },
+            state.rawInput.preferredModel,
+            state.abortSignal
+          );
+        response = llm?.data;
+        if (llm) model = `${llm.provider}:${llm.model}`;
+      }
     } catch (error) {
       if (state.abortSignal?.aborted) throw error;
       console.warn(`[CityWalkGraph] non-route response failed; using deterministic response: ${error instanceof Error ? error.message : String(error)}`);
     }
-    response ??= this.fallbackIntentResponse(intent, state, toolFacts);
+    response ??= socialCopyBrief
+      ? buildFallbackSocialCopyResponse(socialCopyBrief)
+      : this.fallbackIntentResponse(intent, state, toolFacts);
+    if (intent === "route_compare") {
+      // The comparison contract is part of the capability, not an optional
+      // decoration.  DeepSeek sometimes omits recommendation or the whole
+      // comparison object when it has enough prose in `answer`; preserve that
+      // answer as the explicit recommendation so clients and evaluators can
+      // consume a stable structure.
+      const comparison = response.comparison ?? {
+        dimensions: [],
+        options: [],
+        recommendation: "",
+        missingInformation: []
+      };
+      response = {
+        ...response,
+        comparison: {
+          ...comparison,
+          recommendation: comparison.recommendation?.trim() || response.answer || "请根据已列事实选择更合适的路线。"
+        }
+      };
+    }
+    if (socialCopyBrief) {
+      const finalized = finalizeSocialCopyResponseWithDiagnostics(
+        response,
+        socialCopyBrief,
+        socialCopySemanticReview,
+        socialCopyOriginalCandidates
+      );
+      response = finalized.response;
+      if (response.socialCopy && (finalized.diagnostics.fallbackTriggered || socialCopyRegeneration?.attempted)) {
+        response.socialCopy.generationDiagnostics = {
+          ...finalized.diagnostics,
+          regeneration: socialCopyRegeneration
+        };
+      }
+    }
     const serverSources = this.extractInformationSources(toolFacts);
     if (serverSources.length > 0) response = { ...response, sources: serverSources };
     const resultEvent = this.event("RESULT", response.answer || response.title, state, intent);
@@ -816,12 +987,18 @@ export class CityWalkGraphRunner {
       finalAnswer: response.answer || response.title,
       events,
       traceSteps,
-      decisionLog: [`${intent} 分支完成，未进入路线制作循环。`],
+      decisionLog: [socialCopyBrief
+        ? `文案采用“${socialCopyBrief.styleProfile.label}”开放式风格约束，按表达行为与证据等级生成多个候选，再经独立语义评审选择或重写。`
+        : `${intent} 分支完成，未进入路线制作循环。`],
       llmModels: model ? [model] : []
     };
   }
 
   private async parseNode(state: CityWalkGraphState): Promise<CityWalkGraphUpdate> {
+    const skillContext = state.skillContext;
+    const skillPrompt = skillContext ? skillPromptContext(skillContext) : undefined;
+    const promptContext = [memoryService.buildPromptContext(state.memoryContext), skillPrompt]
+      .filter((item): item is string => Boolean(item)).join("\n");
     const fallbackConstraints = state.intent.intent === "route_modify" && state.referenceRoute
       ? state.referenceRoute.result.constraints
       : this.parseConstraints(state.rawInput);
@@ -834,6 +1011,12 @@ export class CityWalkGraphRunner {
     const previousWeatherPreference = previousUserTask ? this.matchWeatherPreference(previousUserTask) : undefined;
     const currentWeatherRisk = this.matchWeatherRisk(state.task);
     const previousWeatherRisk = previousUserTask ? this.matchWeatherRisk(previousUserTask) : undefined;
+    const currentTemporal = parseTravelTemporal(state.task);
+    const previousTemporal = previousUserTask ? parseTravelTemporal(previousUserTask) : undefined;
+    const currentDiscoveryMode = this.matchDiscoveryMode(state.task);
+    const previousDiscoveryMode = previousUserTask ? this.matchDiscoveryMode(previousUserTask) : undefined;
+    const currentDiscoverySignals = compileDiscoveryPolicySignals(state.task);
+    const previousDiscoverySignals = previousUserTask ? compileDiscoveryPolicySignals(previousUserTask) : undefined;
     const previousPeopleCount = previousUserTask ? this.matchPeopleCount(previousUserTask) : undefined;
     const currentParty = this.matchPartyConstraints(state.task);
     const previousParty = previousUserTask ? this.matchPartyConstraints(previousUserTask) : {};
@@ -850,7 +1033,7 @@ export class CityWalkGraphRunner {
     const llmParseAttempt = await this.tryParseConstraintsWithLlm(
       state.task,
       state.rawInput,
-      memoryService.buildPromptContext(state.memoryContext),
+      promptContext || undefined,
       state.abortSignal
     );
     const llmParsed = llmParseAttempt.result;
@@ -958,7 +1141,52 @@ export class CityWalkGraphRunner {
 
     const maxLegMinutes = state.rawInput.maxLegMinutes
       ?? matchedMaxLeg
+      ?? skillContext?.maxLegMinutes
       ?? (previousUserTask ? this.matchMaxLegMinutes(previousUserTask) : undefined);
+    // Only enrich a turn already proven to contain a time expression. This
+    // prevents the model from inventing “today” for time-unspecified routes.
+    const llmTemporal = currentTemporal?.precision === "exact" ? llmParsed?.data.temporal : undefined;
+    const temporal = resolveTravelTemporal(
+      state.rawInput.temporal,
+      currentTemporal,
+      llmTemporal,
+      previousTemporal,
+      state.referenceRoute?.result.constraints.temporal,
+      fallbackConstraints.temporal
+    );
+    // A route modification may safely merge an explicit current-turn place
+    // discovery policy. Deterministic signals remain authoritative; the LLM
+    // only enriches a turn that actually mentions this policy.
+    const allowLlmDiscoveryPolicyMerge = allowLlmOperationalMerge || hasExplicitDiscoveryPolicySignal(state.task);
+    const llmDiscoveryPolicy = allowLlmDiscoveryPolicyMerge ? llmParsed?.data.discoveryPolicy : undefined;
+    const discoveryPolicy = mergeDiscoveryPolicies(
+      state.rawInput.discoveryPolicy,
+      discoveryPolicyFromMode(state.rawInput.discoveryMode),
+      currentDiscoverySignals,
+      discoveryPolicyFromMode(currentDiscoveryMode),
+      llmDiscoveryPolicy,
+      discoveryPolicyFromMode(allowLlmDiscoveryPolicyMerge ? llmParsed?.data.discoveryMode : undefined),
+      skillContext?.discoveryPolicy,
+      previousDiscoverySignals,
+      state.referenceRoute?.result.constraints.discoveryPolicy,
+      discoveryPolicyFromMode(previousDiscoveryMode),
+      fallbackConstraints.discoveryPolicy,
+      discoveryPolicyFromMode(fallbackConstraints.discoveryMode)
+    );
+    const discoveryMode: PlaceDiscoveryMode = deriveDiscoveryMode(discoveryPolicy);
+    const discoveryPolicySource: ConstraintSource = state.rawInput.discoveryPolicy || state.rawInput.discoveryMode
+      ? "request"
+      : Object.keys(currentDiscoverySignals).length || currentDiscoveryMode
+        ? "current_turn"
+        : llmDiscoveryPolicy || (allowLlmDiscoveryPolicyMerge && llmParsed?.data.discoveryMode)
+          ? "llm"
+          : skillContext?.discoveryPolicy
+            ? "skill"
+          : previousDiscoverySignals && Object.keys(previousDiscoverySignals).length
+              || state.referenceRoute?.result.constraints.discoveryPolicy
+              || previousDiscoveryMode
+            ? "recent_context"
+            : "default";
 
     const currentPreferences = this.matchExplicitPreferences(state.task);
     const previousPreferences = previousUserTask ? this.matchExplicitPreferences(previousUserTask) : [];
@@ -968,10 +1196,12 @@ export class CityWalkGraphRunner {
     );
     const resolvedPreferences = state.rawInput.preferences?.length
       ? state.rawInput.preferences
-      : currentPreferences.length > 0
-        ? currentPreferences
+        : currentPreferences.length > 0
+        ? [...currentPreferences, ...(skillContext?.preferences ?? [])]
         : llmPreferences.length > 0
-          ? llmPreferences
+          ? [...llmPreferences, ...(skillContext?.preferences ?? [])]
+          : skillContext?.preferences?.length
+            ? skillContext.preferences
           : previousPreferences.length > 0 ? previousPreferences : fallbackConstraints.preferences;
     const removedPreferenceCategories = state.intent.intent === "route_modify"
       ? this.removedPoiCategories(state.task)
@@ -980,7 +1210,7 @@ export class CityWalkGraphRunner {
       ![...removedPreferenceCategories].some((category) => this.textMatchesPoiCategory(preference, category))
     );
     const preferencesExplicit = Boolean(
-      state.rawInput.preferences?.length || currentPreferences.length > 0 || previousPreferences.length > 0
+      state.rawInput.preferences?.length || currentPreferences.length > 0 || skillContext?.preferences.length || previousPreferences.length > 0
     );
 
     const resolvedParty = this.resolvePartyConstraints({
@@ -988,6 +1218,7 @@ export class CityWalkGraphRunner {
       current: currentParty,
       llm: allowLlmOperationalMerge ? llmParsed?.data.party : undefined,
       llmPeopleCount: allowLlmOperationalMerge ? llmParsed?.data.peopleCount : undefined,
+      skill: skillContext?.party,
       previous: previousParty,
       previousPeopleCount,
       fallback: fallbackConstraints.party
@@ -1002,6 +1233,7 @@ export class CityWalkGraphRunner {
         ? this.groundLlmAccessibility(state.task, llmParsed?.data.accessibility)
         : undefined,
       previous: previousAccessibility,
+      skill: skillContext?.accessibility,
       fallback: fallbackConstraints.accessibility
     });
     const effectiveParty: PartyConstraints = {
@@ -1017,6 +1249,7 @@ export class CityWalkGraphRunner {
       current: currentExperience,
       llm: allowLlmOperationalMerge ? llmParsed?.data.experience : undefined,
       previous: previousExperience,
+      skill: skillContext?.experience,
       fallback: fallbackConstraints.experience,
       party: effectiveParty,
       accessibility: resolvedAccessibility.value
@@ -1025,6 +1258,7 @@ export class CityWalkGraphRunner {
       request: requestStyle,
       current: currentStyle,
       llm: allowLlmOperationalMerge ? llmParsed?.data.style : undefined,
+      skill: skillContext?.style,
       previous: previousStyle,
       fallback: fallbackConstraints.style
     });
@@ -1057,18 +1291,32 @@ export class CityWalkGraphRunner {
         [state.rawInput.preferences?.length ? state.rawInput.preferences : undefined, "request"],
         [currentPreferences.length ? currentPreferences : undefined, "current_turn"],
         [llmPreferences.length ? llmPreferences : undefined, "llm"],
+        [skillContext?.preferences.length ? skillContext.preferences : undefined, "skill"],
         [previousPreferences.length ? previousPreferences : undefined, "recent_context"],
         [fallbackConstraints.preferences, "default"]
       ]), "soft"),
       this.constraintLedgerEntry("transportMode", state.rawInput.transportMode ?? currentTransportMode ?? previousTransportMode ?? fallbackConstraints.transportMode, this.firstConstraintSource([
         [state.rawInput.transportMode, "request"], [currentTransportMode, "current_turn"],
+        [skillContext?.transportMode, "skill"],
         [previousTransportMode, "recent_context"], [fallbackConstraints.transportMode, "default"]
       ]), "soft"),
       this.constraintLedgerEntry("maxLegMinutes", maxLegMinutes, this.firstConstraintSource([
         [state.rawInput.maxLegMinutes, "request"], [matchedMaxLeg, "current_turn"],
+        [skillContext?.maxLegMinutes, "skill"],
         [previousUserTask ? this.matchMaxLegMinutes(previousUserTask) : undefined, "recent_context"]
       ]), "hard")
       ,
+      this.constraintLedgerEntry("temporal", temporal, this.firstConstraintSource([
+        [state.rawInput.temporal, "request"], [currentTemporal, "current_turn"], [llmTemporal, "llm"],
+        [previousTemporal ?? state.referenceRoute?.result.constraints.temporal, "recent_context"]
+      ]), "hard"),
+      this.constraintLedgerEntry("discoveryMode", discoveryMode, this.firstConstraintSource([
+        [state.rawInput.discoveryMode, "request"], [currentDiscoveryMode, "current_turn"],
+        [allowLlmDiscoveryPolicyMerge ? llmParsed?.data.discoveryMode : undefined, "llm"],
+        [skillContext?.discoveryPolicy, "skill"],
+        [previousDiscoveryMode, "recent_context"], [fallbackConstraints.discoveryMode, "default"]
+      ]), "soft"),
+      this.constraintLedgerEntry("discoveryPolicy", discoveryPolicy, discoveryPolicySource, "soft"),
       this.constraintLedgerEntry("style.rawText", effectiveStyle.rawText, resolvedStyle.source, "soft"),
       this.constraintLedgerEntry("style.summary", effectiveStyle.summary, resolvedStyle.source, "soft"),
       this.constraintLedgerEntry("style.tags", effectiveStyle.tags, resolvedStyle.source, "soft"),
@@ -1088,18 +1336,21 @@ export class CityWalkGraphRunner {
       experience: resolvedExperience.value,
       accessibility: resolvedAccessibility.value,
       style: effectiveStyle,
+      discoveryMode,
+      discoveryPolicy,
+      temporal,
       constraintLedger: [...baseLedger, ...resolvedParty.ledger, ...resolvedExperience.ledger, ...resolvedAccessibility.ledger],
-      transportMode: state.rawInput.transportMode ?? currentTransportMode ?? previousTransportMode ?? fallbackConstraints.transportMode,
+      transportMode: state.rawInput.transportMode ?? currentTransportMode ?? skillContext?.transportMode ?? previousTransportMode ?? fallbackConstraints.transportMode,
       // Route-wide weather policy must come from an explicit cue or live
       // weather, not from a sentence that merely requires one indoor stop.
-      weatherPreference: state.rawInput.weatherPreference ?? currentWeatherPreference ?? previousWeatherPreference ?? fallbackConstraints.weatherPreference,
+      weatherPreference: state.rawInput.weatherPreference ?? currentWeatherPreference ?? skillContext?.weatherPreference ?? previousWeatherPreference ?? fallbackConstraints.weatherPreference,
       weatherRisk: state.rawInput.weatherRisk ?? currentWeatherRisk ?? previousWeatherRisk ?? fallbackConstraints.weatherRisk,
       endPoint,
       maxLegMinutes,
       preferencesExplicit,
       transportModeExplicit: Boolean(state.rawInput.transportMode || currentTransportMode || previousTransportMode),
       weatherPreferenceExplicit: Boolean(
-        state.rawInput.weatherPreference || currentWeatherPreference || previousWeatherPreference
+        state.rawInput.weatherPreference || currentWeatherPreference || skillContext?.weatherPreference || previousWeatherPreference
       ),
       maxLegMinutesExplicit: Boolean(state.rawInput.maxLegMinutes || matchedMaxLeg || (previousUserTask && this.matchMaxLegMinutes(previousUserTask))),
       partyExplicit: resolvedParty.explicit,
@@ -1107,6 +1358,19 @@ export class CityWalkGraphRunner {
       styleExplicit: resolvedStyle.explicit
     };
     const constraints = memoryService.applyDefaults(currentTurnConstraints, state.rawInput, state.memoryContext);
+    if (skillContext) {
+      constraints.constraintLedger = constraints.constraintLedger.map((entry) => {
+        if (entry.source !== "skill") return entry;
+        const matched = [...skillContext.rulesBySkill.entries()]
+          .flatMap(([skillId, rules]) => rules.map((rule) => ({ skillId, rule })))
+          .find(({ rule }) => rule.path === entry.path);
+        const skill = matched ? skillContext.skills.find((item) => item.id === matched.skillId) : undefined;
+        return matched && skill
+          ? { ...entry, sourceId: skill.id, sourceLabel: skill.name }
+          : entry;
+      });
+    }
+    const skillExecutions = skillContext ? buildSkillExecutions(skillContext, constraints) : [];
     const content = llmParsed
       ? `使用 ${llmParsed.model} 解析自然语言约束，并合并表单显式字段。`
       : llmParseAttempt.reason === "unconfigured"
@@ -1126,12 +1390,13 @@ export class CityWalkGraphRunner {
 
     return {
       constraints,
-      weatherRisk: constraints.weatherRisk ?? "medium",
+      weatherRisk: constraints.weatherRisk,
       events: [event],
       traceSteps: [{ type: "thought", content: event.content }],
       llmModels: llmParsed ? [`${llmParsed.provider}:${llmParsed.model}`] : [],
+      skillExecutions,
       decisionLog: [
-        `解析约束：城市=${constraints.city}，起点=${constraints.startPoint}，时长=${constraints.durationMinutes}分钟，${budgetNote}${endNote}${legNote}同行=${partyNote}，体验=${experienceNote || "常规"}，无障碍=${accessibilityNote || "无特殊要求"}，风格=${styleNote || "默认"}，偏好=${(constraints.preferences ?? []).join("、") || "默认"}`
+        `解析约束：城市=${constraints.city}，起点=${constraints.startPoint}，出行时间=${describeTravelTemporal(constraints.temporal)}，时长=${constraints.durationMinutes}分钟，${budgetNote}${endNote}${legNote}同行=${partyNote}，体验=${experienceNote || "常规"}，无障碍=${accessibilityNote || "无特殊要求"}，风格=${styleNote || "默认"}，地点策略=${describeDiscoveryPolicy(constraints.discoveryPolicy)}，偏好=${(constraints.preferences ?? []).join("、") || "默认"}`
       ]
     };
   }
@@ -1141,10 +1406,11 @@ export class CityWalkGraphRunner {
       state.task,
       state.constraints,
       state.rawInput.preferredModel,
-      memoryService.buildPromptContext(state.memoryContext),
+      [memoryService.buildPromptContext(state.memoryContext), state.skillContext ? skillPromptContext(state.skillContext) : undefined]
+        .filter((item): item is string => Boolean(item)).join("\n") || undefined,
       state.abortSignal
     );
-    const planSteps: AgentPlanStep[] = llmPlan?.data ?? [
+    let planSteps: AgentPlanStep[] = llmPlan?.data ?? [
       {
         id: "weather",
         description: "查询天气预报、预警、空气质量与生活指数，判断是否需要室内优先。",
@@ -1174,6 +1440,7 @@ export class CityWalkGraphRunner {
         status: "pending"
       }
     ];
+    planSteps = this.ensureSkillPlanSteps(planSteps, state.skillContext);
     const event = this.event(
       "PLAN",
       `${llmPlan ? `使用 ${llmPlan.model}` : "使用默认规划器"}生成 ${planSteps.length} 步动态计划：${planSteps.map((step) => step.description).join(" -> ")}`,
@@ -1226,6 +1493,8 @@ export class CityWalkGraphRunner {
         rainProbability: 0,
         risk: "low",
         summary: "尚未指定城市，暂不查询天气",
+        decisionUsable: false,
+        forecastKind: "unavailable",
         indices: []
       };
       const obs = this.event("OBS", weather.summary, state, step.id, {
@@ -1235,7 +1504,7 @@ export class CityWalkGraphRunner {
       });
       return {
         weather,
-        weatherRisk: state.constraints.weatherRisk ?? "low",
+        weatherRisk: state.constraints.weatherRisk,
         planSteps: this.completeStep(runningSteps, step.id),
         currentStepIndex: state.currentStepIndex + 1,
         events: [thought, obs],
@@ -1243,14 +1512,21 @@ export class CityWalkGraphRunner {
         decisionLog: ["城市缺失，跳过天气查询，等待用户补充城市。"]
       };
     }
-    const input = { city: state.constraints.city };
+    const input = { city: state.constraints.city, temporal: state.constraints.temporal };
     const action = this.event("ACTION", "调用天气工具获取降雨概率、预警、空气质量与生活指数。", state, step.id, {
       tool: "get_weather",
       input
     });
-    const weather = await this.weatherTool.getWeatherContext(state.constraints.city, state.abortSignal);
-    const weatherRisk = state.constraints.weatherRisk ?? weather.risk;
-    const obs = this.event("OBS", `天气工具返回：${weather.summary}，风险=${weatherRisk}`, state, step.id, {
+    const weather = await this.weatherTool.getWeatherContext(state.constraints.city, {
+      departureAt: state.constraints.temporal.departureAt,
+      visitDate: state.constraints.temporal.visitDate,
+      durationMinutes: state.constraints.durationMinutes,
+      timezone: state.constraints.temporal.timezone,
+      precision: state.constraints.temporal.precision
+    }, state.abortSignal);
+    const weatherRisk = state.constraints.weatherRisk
+      ?? (weather.decisionUsable !== false ? weather.risk : undefined);
+    const obs = this.event("OBS", `天气工具返回：${weather.summary}，风险=${weatherRisk ?? "unknown"}`, state, step.id, {
       tool: "get_weather",
       input,
       output: weather
@@ -1267,7 +1543,9 @@ export class CityWalkGraphRunner {
         { type: "tool_call", tool: "get_weather", input },
         { type: "tool_result", tool: "get_weather", output: weather }
       ],
-      decisionLog: [`天气风险更新为 ${weatherRisk}。`]
+      decisionLog: [weatherRisk
+        ? `出行时段天气风险更新为 ${weatherRisk}。`
+        : "出行时间缺失或超出预报范围，天气不参与路线选点。"]
     };
   }
 
@@ -1281,7 +1559,9 @@ export class CityWalkGraphRunner {
     const startLocation = citySpecified
       ? state.startLocation ?? (await this.mapTool.geocode(state.constraints.startPoint, state.constraints.city, state.abortSignal))
       : undefined;
-    const indoorOnly = state.weatherRisk === "high" || state.constraints.weatherPreference === "indoor_first";
+    const indoorOnly = state.weatherRisk === "high"
+      || state.constraints.weatherPreference === "indoor_first"
+      || (state.constraints.weatherPreference === "avoid_rain" && state.weatherRisk === "medium");
     const searchKeywords = this.buildPoiSearchKeywords(state.constraints);
     const input = {
       city: state.constraints.city,
@@ -1291,21 +1571,29 @@ export class CityWalkGraphRunner {
       party: state.constraints.party,
       experience: state.constraints.experience,
       accessibility: state.constraints.accessibility,
-      style: state.constraints.style
+      style: state.constraints.style,
+      discoveryMode: state.constraints.discoveryMode,
+      discoveryPolicy: state.constraints.discoveryPolicy
     };
     const action = this.event("ACTION", "调用地图 POI 工具搜索候选点。", state, step.id, {
       tool: startLocation ? "search_poi_nearby" : "search_poi",
       input
     });
-    let candidatePois = citySpecified
-      ? await this.mapTool.searchNearbyPoi(searchKeywords, {
+    const discovery = citySpecified
+      ? await this.placeDiscovery.discover({
           city: state.constraints.city,
+          task: state.task,
+          keywords: searchKeywords,
           location: startLocation,
           indoorOnly,
           radius: 5000,
+          mode: state.constraints.discoveryMode,
+          policy: state.constraints.discoveryPolicy,
+          preferredModel: state.rawInput.preferredModel,
           signal: state.abortSignal
         })
-      : [];
+      : { pois: [] as Poi[], sources: [] as InformationSource[], mapCandidateCount: 0, webSourceCount: 0, webMatchedCount: 0 };
+    let candidatePois = discovery.pois;
     const mismatchedPoiCount = candidatePois.filter((poi) => !this.isPoiCityCompatible(poi, state.constraints.city)).length;
     candidatePois = candidatePois.filter((poi) => this.isPoiCityCompatible(poi, state.constraints.city));
 
@@ -1375,8 +1663,10 @@ export class CityWalkGraphRunner {
           styleShortlist.map((poi) => ({
             name: poi.name,
             category: poi.category,
+            subtype: poi.subtype,
             address: poi.address,
-            tags: poi.tags
+            tags: poi.tags,
+            discoveryReasons: poi.discoveryReasons
           })),
           state.rawInput.preferredModel,
           state.abortSignal
@@ -1412,7 +1702,7 @@ export class CityWalkGraphRunner {
         console.warn(`[CityWalkGraph] style rerank failed; retaining embedding/lexical score: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    const obs = this.event("OBS", `地图工具返回 ${candidatePois.length} 个候选点${endPointPoi ? `（含指定终点：${endPointPoi.name}）` : ''}。`, state, step.id, {
+    const obs = this.event("OBS", `地点发现层返回 ${candidatePois.length} 个候选点，其中 ${discovery.webMatchedCount} 个来自公开网页发现并经高德匹配${endPointPoi ? `（含指定终点：${endPointPoi.name}）` : ''}。`, state, step.id, {
       tool: startLocation ? "search_poi_nearby" : "search_poi",
       input,
       output: candidatePois
@@ -1431,7 +1721,7 @@ export class CityWalkGraphRunner {
       ],
       decisionLog: [
         citySpecified
-          ? `候选 POI 数量：${candidatePois.length}${mismatchedPoiCount ? `；已剔除 ${mismatchedPoiCount} 个跨城市结果` : ""}。`
+          ? `候选 POI 数量：${candidatePois.length}；地图基础候选 ${discovery.mapCandidateCount} 个，网页发现并完成地图匹配 ${discovery.webMatchedCount} 个${mismatchedPoiCount ? `；已剔除 ${mismatchedPoiCount} 个跨城市结果` : ""}。`
           : "未指定城市，跳过 POI 搜索，不使用任何默认城市。"
       ]
     };
@@ -1484,7 +1774,7 @@ export class CityWalkGraphRunner {
         // Bookstores, parks and malls have no mandatory admission cost when
         // the provider reports zero; optional purchases must not delete them
         // from a route during budget reflection.
-        const freeEntryCategory = ["bookstore", "park", "mall"].includes(stop.category);
+        const freeEntryCategory = ["bookstore", "park", "mall", "shop", "market", "studio", "street_scene"].includes(stop.category);
         const perPerson = mappedCost > 0 ? mappedCost : freeEntryCategory ? 0 : llmCost;
         const enrichedStay = Number.isFinite(item.estimatedStayMinutes)
           ? Math.max(10, Math.round(item.estimatedStayMinutes))
@@ -1523,38 +1813,29 @@ export class CityWalkGraphRunner {
       }
     });
 
-    let routeLegs = await this.mapTool.planRoute(origin, destinations, state.constraints.transportMode ?? "mixed", state.constraints.city, state.abortSignal);
-
-    // Fallback: if Amap API returned no routes, use straight-line estimates so the map still shows lines
-    if (routeLegs.length === 0 || routeLegs.every(l => l.distanceMeters === 0)) {
-      const allCoords = [origin, ...destinations].map(c => c?.split(",").map(Number) as [number, number] | undefined).filter(Boolean) as [number, number][];
-      routeLegs = [];
-      for (let i = 0; i < allCoords.length - 1; i++) {
-        const [lng1, lat1] = allCoords[i];
-        const [lng2, lat2] = allCoords[i + 1];
-        const dist = haversineKm(lng1, lat1, lng2, lat2) * 1000;
-        const walkMin = Math.max(1, Math.round(dist / 80)); // ~5 km/h walking
-        routeLegs.push({
-          origin: allCoords[i].join(","),
-          destination: allCoords[i + 1].join(","),
-          distanceMeters: Math.round(dist),
-          durationMinutes: walkMin,
-          mode: dist > 3000 ? "transit" : "walk",
-          estimated: true
-        });
-      }
-    }
+    let routeLegs = completeRouteLegs(
+      origin,
+      destinations,
+      await this.mapTool.planRoute(origin, destinations, state.constraints.transportMode ?? "mixed", state.constraints.city, state.abortSignal)
+    );
 
     // Enforce maxLegMinutes: if any walk leg exceeds limit, replan with transit
     const maxLegMinutes = this.effectiveMaxLegMinutes(state.constraints);
     if (maxLegMinutes) {
       const tooLong = routeLegs.some((leg) => leg.mode === "walk" && leg.durationMinutes > maxLegMinutes);
       if (tooLong) {
-        const transitLegs = await this.mapTool.planRoute(origin, destinations, "transit", state.constraints.city, state.abortSignal);
+        const transitLegs = completeRouteLegs(
+          origin,
+          destinations,
+          await this.mapTool.planRoute(origin, destinations, "transit", state.constraints.city, state.abortSignal)
+        );
         if (transitLegs.length) routeLegs = transitLegs;
       }
     }
     routeLegs = this.withRouteLegLabels(routeLegs, state.constraints.startPoint, locatedStops);
+    const scheduled = scheduleRouteByDeparture(selectedStops, routeLegs, state.constraints.temporal);
+    selectedStops = scheduled.stops;
+    routeLegs = scheduled.legs;
 
     const routeMinutes = routeLegs.reduce((sum, leg) => sum + leg.durationMinutes, 0);
     const stayMinutes = selectedStops.reduce((sum, stop) => sum + stop.estimatedStayMinutes, 0);
@@ -1598,7 +1879,7 @@ export class CityWalkGraphRunner {
         },
         { type: "tool_result", tool: "plan_route", output: routeLegs }
       ],
-      decisionLog: [`路线：${selectedStops.map((stop) => stop.name).join(" → ") || "无可选点位"}（${modeSummary}，路程${routeMinutes}分钟 + 停留${stayMinutes}分钟；按${this.describeParty(state.constraints.party)}核算费用）`]
+      decisionLog: [`路线：${selectedStops.map((stop) => stop.name).join(" → ") || "无可选点位"}（${formatShanghaiClock(state.constraints.temporal.departureAt) ? `${formatShanghaiClock(state.constraints.temporal.departureAt)}出发，` : ""}${modeSummary}，路程${routeMinutes}分钟 + 停留${stayMinutes}分钟；按${this.describeParty(state.constraints.party)}核算费用）`]
     };
   }
 
@@ -1664,27 +1945,36 @@ export class CityWalkGraphRunner {
       const origin = workingState.startLocation ?? workingState.constraints.startPoint;
       const destinations = reflectedStops.map((stop) => stop.location).filter((location): location is string => Boolean(location));
       const locatedStops = reflectedStops.filter((stop): stop is RouteStop & { location: string } => Boolean(stop.location));
-      let newLegs = await this.mapTool.planRoute(
+      let newLegs = completeRouteLegs(
         origin,
         destinations,
-        workingState.constraints.transportMode ?? "mixed",
-        workingState.constraints.city,
-        workingState.abortSignal
+        await this.mapTool.planRoute(
+          origin,
+          destinations,
+          workingState.constraints.transportMode ?? "mixed",
+          workingState.constraints.city,
+          workingState.abortSignal
+        )
       );
       const maxLegMinutes = this.effectiveMaxLegMinutes(workingState.constraints);
       if (maxLegMinutes && newLegs.some((leg) => leg.mode === "walk" && leg.durationMinutes > maxLegMinutes)) {
-        const transitLegs = await this.mapTool.planRoute(origin, destinations, "transit", workingState.constraints.city, workingState.abortSignal);
+        const transitLegs = completeRouteLegs(
+          origin,
+          destinations,
+          await this.mapTool.planRoute(origin, destinations, "transit", workingState.constraints.city, workingState.abortSignal)
+        );
         if (transitLegs.length) newLegs = transitLegs;
       }
       newLegs = this.withRouteLegLabels(newLegs, workingState.constraints.startPoint, locatedStops);
+      const scheduled = scheduleRouteByDeparture(reflectedStops, newLegs, workingState.constraints.temporal);
 
-      const routeMinutes = newLegs.reduce((sum, leg) => sum + leg.durationMinutes, 0);
-      const stayMinutes = reflectedStops.reduce((sum, stop) => sum + stop.estimatedStayMinutes, 0);
+      const routeMinutes = scheduled.legs.reduce((sum, leg) => sum + leg.durationMinutes, 0);
+      const stayMinutes = scheduled.stops.reduce((sum, stop) => sum + stop.estimatedStayMinutes, 0);
       workingState = {
         ...workingState,
-        selectedStops: reflectedStops,
-        routeLegs: newLegs,
-        totalEstimatedCost: reflectedStops.reduce((sum, stop) => sum + stop.estimatedCost, 0),
+        selectedStops: scheduled.stops,
+        routeLegs: scheduled.legs,
+        totalEstimatedCost: scheduled.stops.reduce((sum, stop) => sum + stop.estimatedCost, 0),
         totalEstimatedMinutes: stayMinutes + routeMinutes
       };
       corrections.push(correction);
@@ -1777,6 +2067,7 @@ export class CityWalkGraphRunner {
     current: Partial<PartyConstraints>;
     llm?: unknown;
     llmPeopleCount?: number;
+    skill?: Partial<PartyConstraints>;
     previous: Partial<PartyConstraints>;
     previousPeopleCount?: number;
     fallback: PartyConstraints;
@@ -1789,6 +2080,7 @@ export class CityWalkGraphRunner {
     const previous = this.normalizePartyCandidate(options.previous);
     if (options.previousPeopleCount != null && previous.total == null) previous.total = options.previousPeopleCount;
     const fallback = this.normalizePartyCandidate(options.fallback);
+    const skill = this.normalizePartyCandidate(options.skill);
     const sources: Record<string, ConstraintSource> = {};
 
     const pick = <K extends keyof PartyConstraints>(field: K): PartyConstraints[K] | undefined => {
@@ -1796,6 +2088,7 @@ export class CityWalkGraphRunner {
         [request[field], "request"],
         [current[field], "current_turn"],
         [llm[field], "llm"],
+        [skill[field], "skill"],
         [previous[field], "recent_context"],
         [fallback[field], "default"]
       ];
@@ -1853,6 +2146,7 @@ export class CityWalkGraphRunner {
     input: PlanRequest;
     current: RouteExperienceConstraints;
     llm?: unknown;
+    skill?: RouteExperienceConstraints;
     previous: RouteExperienceConstraints;
     fallback: RouteExperienceConstraints;
     party: PartyConstraints;
@@ -1861,6 +2155,7 @@ export class CityWalkGraphRunner {
     const request = this.normalizeExperienceCandidate(options.input.experience);
     const current = this.normalizeExperienceCandidate(options.current);
     const llm = this.normalizeExperienceCandidate(options.llm);
+    const skill = this.normalizeExperienceCandidate(options.skill);
     const previous = this.normalizeExperienceCandidate(options.previous);
     const fallback = this.normalizeExperienceCandidate(options.fallback);
     const sources: Record<string, ConstraintSource> = {};
@@ -1874,6 +2169,7 @@ export class CityWalkGraphRunner {
         [request[field], "request"],
         [current[field], "current_turn"],
         [llm[field], "llm"],
+        [skill[field], "skill"],
         [previous[field], "recent_context"],
         [fallback[field], "default"]
       ];
@@ -1922,12 +2218,14 @@ export class CityWalkGraphRunner {
     input: PlanRequest;
     current: AccessibilityConstraints;
     llm?: unknown;
+    skill?: AccessibilityConstraints;
     previous: AccessibilityConstraints;
     fallback: AccessibilityConstraints;
   }): { value: AccessibilityConstraints; ledger: ConstraintLedgerEntry[]; explicit: boolean } {
     const request = this.normalizeAccessibilityCandidate(options.input.accessibility);
     const current = this.normalizeAccessibilityCandidate(options.current);
     const llm = this.normalizeAccessibilityCandidate(options.llm);
+    const skill = this.normalizeAccessibilityCandidate(options.skill);
     const previous = this.normalizeAccessibilityCandidate(options.previous);
     const fallback = this.normalizeAccessibilityCandidate(options.fallback);
     const fields: Array<keyof AccessibilityConstraints> = [
@@ -1944,6 +2242,7 @@ export class CityWalkGraphRunner {
         [request[field], "request"],
         [current[field], "current_turn"],
         [llm[field], "llm"],
+        [skill[field], "skill"],
         [previous[field], "recent_context"],
         [fallback[field], "default"]
       ];
@@ -1968,6 +2267,7 @@ export class CityWalkGraphRunner {
     request: StyleIntent;
     current: StyleIntent;
     llm?: unknown;
+    skill?: StyleIntent;
     previous: StyleIntent;
     fallback: StyleIntent;
   }): { value: StyleIntent; source: ConstraintSource; explicit: boolean } {
@@ -1975,13 +2275,14 @@ export class CityWalkGraphRunner {
     // family, POI categories) as an aesthetic style. Only accept its style
     // expansion when another source establishes that the user requested a
     // style. Open-ended wording is still preserved by compileHeuristicStyle.
-    const hasIndependentStyleSignal = [options.request, options.current, options.previous, options.fallback]
+    const hasIndependentStyleSignal = [options.request, options.current, options.skill, options.previous, options.fallback]
       .some(isStyleActive);
     const llm = hasIndependentStyleSignal ? normalizeStyleIntent(options.llm) : emptyStyleIntent();
     const candidates: Array<[StyleIntent, ConstraintSource]> = [
       [options.request, "request"],
       [options.current, "current_turn"],
       [llm, "llm"],
+      [options.skill ?? emptyStyleIntent(), "skill"],
       [options.previous, "recent_context"],
       [options.fallback, "default"]
     ];
@@ -2120,6 +2421,14 @@ export class CityWalkGraphRunner {
     const weatherPreference = input.weatherPreference ?? this.matchWeatherPreference(task);
     const endPoint = input.endPoint ?? this.matchEndPoint(task);
     const maxLegMinutes = input.maxLegMinutes ?? this.matchMaxLegMinutes(task);
+    const temporal = resolveTravelTemporal(input.temporal, parseTravelTemporal(task));
+    const discoveryPolicy = mergeDiscoveryPolicies(
+      input.discoveryPolicy,
+      discoveryPolicyFromMode(input.discoveryMode),
+      compileDiscoveryPolicySignals(task),
+      discoveryPolicyFromMode(this.matchDiscoveryMode(task))
+    );
+    const discoveryMode = deriveDiscoveryMode(discoveryPolicy);
     const party = this.resolvePartyConstraints({
       input,
       current: this.matchPartyConstraints(task),
@@ -2157,6 +2466,9 @@ export class CityWalkGraphRunner {
       experience: experience.value,
       accessibility: accessibility.value,
       style,
+      discoveryMode,
+      discoveryPolicy,
+      temporal,
       constraintLedger: [...party.ledger, ...experience.ledger, ...accessibility.ledger],
       transportMode: input.transportMode ?? (/地铁|公交/.test(task) ? "transit" : "mixed"),
       weatherPreference,
@@ -2223,6 +2535,13 @@ export class CityWalkGraphRunner {
       input.styleDescription ? compileHeuristicStyle(input.styleDescription, true) : undefined,
       compileHeuristicStyle(input.task ?? "")
     );
+    const discoveryPolicy = mergeDiscoveryPolicies(
+      input.discoveryPolicy,
+      discoveryPolicyFromMode(input.discoveryMode),
+      compileDiscoveryPolicySignals(input.task ?? ""),
+      discoveryPolicyFromMode(this.matchDiscoveryMode(input.task ?? ""))
+    );
+    const temporal = resolveTravelTemporal(input.temporal, parseTravelTemporal(input.task ?? ""));
     return {
       city,
       startPoint: input.startPoint?.trim() ?? this.matchStartPoint(input.task ?? "") ?? this.defaultStartPointForCity(city),
@@ -2234,6 +2553,9 @@ export class CityWalkGraphRunner {
       experience: experience.value,
       accessibility: accessibility.value,
       style,
+      discoveryMode: deriveDiscoveryMode(discoveryPolicy),
+      discoveryPolicy,
+      temporal,
       constraintLedger: [...party.ledger, ...experience.ledger, ...accessibility.ledger],
       transportMode: input.transportMode ?? "mixed",
       weatherPreference: input.weatherPreference ?? undefined,
@@ -2254,6 +2576,7 @@ export class CityWalkGraphRunner {
         && !this.isNonVisitPoi(poi)
         && !this.isUnsuitableForParty(poi, state.constraints)
         && !this.isUnsuitableForAccessibility(poi, state.constraints)
+        && !this.isUnsuitableForDiscoveryPolicy(poi, state.constraints)
         && !this.isUnsuitableForStyle(poi, state.constraints)
         && !removedCategories.has(poi.category))
       .sort((left, right) => {
@@ -2285,7 +2608,7 @@ export class CityWalkGraphRunner {
       // A route is not useful when keyword retrieval fills every slot with
       // near-identical businesses (for example three coffee shops). Keep one
       // stop per functional category; generic sights may use two slots.
-      const categoryLimit = poi.category === "sight" ? 2 : 1;
+      const categoryLimit = ["sight", "street_scene", "shop", "studio", "market"].includes(poi.category) ? 2 : 1;
       if (stops.filter((stop) => stop.category === poi.category).length >= categoryLimit) continue;
 
       let stay = this.adjustedStayMinutes(poi.category, state.constraints);
@@ -2308,6 +2631,9 @@ export class CityWalkGraphRunner {
       stops.push({
         name: poi.name,
         category: poi.category,
+        kind: poi.kind,
+        subtype: poi.subtype,
+        amapTypeCode: poi.amapTypeCode,
         estimatedCost: groupCost,
         estimatedCostPerPerson: costPerPerson,
         estimatedStayMinutes: stay,
@@ -2315,6 +2641,12 @@ export class CityWalkGraphRunner {
         styleMatches: poi.styleMatches,
         styleScore: poi.styleScore,
         styleConflicts: poi.styleConflicts,
+        discoverySource: poi.discoverySource,
+        verificationStatus: poi.verificationStatus,
+        evidenceUrls: poi.evidenceUrls,
+        discoveryReasons: poi.discoveryReasons,
+        discoveryConfidence: poi.discoveryConfidence,
+        cityWalkScore: poi.cityWalkScore,
         reason: this.buildStopReason(poi, state.constraints, suitabilityTags),
         location: poi.location,
         address: poi.address,
@@ -2357,6 +2689,9 @@ export class CityWalkGraphRunner {
     return {
       name: poi.name,
       category: poi.category,
+      kind: poi.kind,
+      subtype: poi.subtype,
+      amapTypeCode: poi.amapTypeCode,
       estimatedCost: this.estimateGroupCost(costPerPerson, poi.category, constraints.party),
       estimatedCostPerPerson: costPerPerson,
       estimatedStayMinutes: this.adjustedStayMinutes(poi.category, constraints),
@@ -2364,6 +2699,12 @@ export class CityWalkGraphRunner {
       styleMatches: poi.styleMatches,
       styleScore: poi.styleScore,
       styleConflicts: poi.styleConflicts,
+      discoverySource: poi.discoverySource,
+      verificationStatus: poi.verificationStatus,
+      evidenceUrls: poi.evidenceUrls,
+      discoveryReasons: poi.discoveryReasons,
+      discoveryConfidence: poi.discoveryConfidence,
+      cityWalkScore: poi.cityWalkScore,
       reason: reasonOverride ?? this.buildStopReason(poi, constraints, suitabilityTags),
       location: poi.location,
       address: poi.address,
@@ -2381,14 +2722,22 @@ export class CityWalkGraphRunner {
       : 0;
     const crowdPenalty = constraints.experience.avoidCrowds && /广场|步行街|夜市|热门/.test(`${poi.name}${poi.tags?.join("")}`) ? 20 : 0;
     const styleScore = isStyleActive(constraints.style) ? (poi.styleScore ?? 0) * 70 : 0;
+    const cityWalkScore = (poi.cityWalkScore ?? 0) * 45;
     const styleConflictPenalty = isStyleActive(constraints.style) ? (poi.styleConflicts?.length ?? 0) * 35 : 0;
+    const exposurePenalty = exposurePolicyApplies(constraints.discoveryPolicy, poi.category)
+      && this.hasOverexposureEvidence(poi)
+      ? constraints.discoveryPolicy.exposureStrength === "strict" ? 80 : 30
+      : 0;
     return (poi.rating ?? 4) * 10 - poi.averageCost / 5
-      + (poi.indoor && state.weatherRisk === "high" ? 20 : 0)
+      + (poi.indoor && (state.weatherRisk === "high"
+        || (state.constraints.weatherPreference === "avoid_rain" && state.weatherRisk === "medium")) ? 20 : 0)
       + this.memoryPoiScore(poi, state.memoryContext)
       + tags.length * 8
       + styleScore
+      + cityWalkScore
       - distancePenalty
       - crowdPenalty
+      - exposurePenalty
       - styleConflictPenalty;
   }
 
@@ -2404,6 +2753,21 @@ export class CityWalkGraphRunner {
     return /仅楼梯|无电梯|台阶较多|登山|攀岩|攀爬|陡坡|山路/.test(text);
   }
 
+  private hasOverexposureEvidence(poi: Poi): boolean {
+    return /网红|打卡|爆火|刷屏|游客扎堆|热门景区|商业综合体|购物中心|主题乐园|全国连锁/u.test([
+      poi.name,
+      poi.subtype,
+      ...(poi.tags ?? []),
+      ...(poi.discoveryReasons ?? [])
+    ].filter(Boolean).join(" "));
+  }
+
+  private isUnsuitableForDiscoveryPolicy(poi: Poi, constraints: UserConstraints): boolean {
+    return constraints.discoveryPolicy.exposureStrength === "strict"
+      && exposurePolicyApplies(constraints.discoveryPolicy, poi.category)
+      && this.hasOverexposureEvidence(poi);
+  }
+
   /**
    * Keyword search can return businesses that merely contain a theme word
    * (for example a children's coding school for “亲子”, or a hotel for
@@ -2411,8 +2775,13 @@ export class CityWalkGraphRunner {
    */
   private isNonVisitPoi(poi: Poi): boolean {
     const text = `${poi.name} ${(poi.tags ?? []).join(" ")}`;
-    if (/住宿服务|宾馆酒店|培训机构|教育培训|中小学校|公司企业|商务写字楼|房地产|停车场|汽车服务|公共厕所|公共卫生间|无障碍洗手间|无障碍卫生间/.test(text)) return true;
-    if (poi.category === "mall" && /珠宝首饰|专卖店|便利店|零售店|礼品店|名创优品|培训机构|教育/.test(text)) return true;
+    const specialtyEvidence = /古着|唱片|买手|花店|杂货|文创|二手|旧货|独立|主理人|甜品|手作|工作室|工坊/u.test(text);
+    if (/住宿服务|宾馆酒店|停车场|汽车服务|公共厕所|公共卫生间|无障碍洗手间|无障碍卫生间/u.test(text)) return true;
+    if (/培训机构|教育培训|中小学校|公司企业|商务写字楼|房地产/u.test(text) && !specialtyEvidence) return true;
+    // Generic chain convenience stores are utility POIs, but specialty retail
+    // (vintage, records, florists, independent boutiques) is valid CityWalk content.
+    if (/名创优品|便利店|手机营业厅|彩票销售|烟酒专卖|珠宝首饰|五金店|家电卖场|超市/u.test(text)
+      && !specialtyEvidence) return true;
     return false;
   }
 
@@ -2430,7 +2799,9 @@ export class CityWalkGraphRunner {
     const tokens = [
       poi.name,
       poi.address ?? "",
+      poi.subtype ?? "",
       ...(poi.tags ?? []),
+      ...(poi.discoveryReasons ?? []),
       ...(POI_CATEGORY_WORDS[poi.category] ?? [])
     ].map(normalize).filter((token) => token.length >= 2);
     const bigrams = (value: string) => {
@@ -2471,12 +2842,15 @@ export class CityWalkGraphRunner {
     if (isStyleActive(constraints.style) && (poi.styleMatches?.length ?? 0) > 0) {
       tags.push(`风格匹配：${poi.styleMatches!.slice(0, 2).join("、")}`);
     }
+    if (poi.discoverySource === "web" && poi.verificationStatus === "map_matched") tags.push("公开来源发现且已完成地图匹配");
+    if (["shop", "market", "studio", "street_scene"].includes(poi.category)) tags.push("具有 CityWalk 特色停留价值");
     return tags;
   }
 
   private buildStopReason(poi: Poi, constraints: UserConstraints, tags: string[]): string {
     if (tags.length > 0) return `${tags.join("、")}，并符合当前偏好与预算`;
-    if (constraints.weatherPreference === "indoor_first" && poi.indoor) return "天气风险下优先选择室内点位";
+    if ((constraints.weatherPreference === "indoor_first"
+      || constraints.weatherPreference === "avoid_rain") && poi.indoor) return "天气风险下优先选择室内点位";
     if (isStyleActive(constraints.style) && poi.styleMatches?.length) {
       return `符合“${constraints.style.summary || constraints.style.rawText}”，命中${poi.styleMatches.slice(0, 2).join("、")}`;
     }
@@ -2526,7 +2900,10 @@ export class CityWalkGraphRunner {
     if (constraints.accessibility.elevatorRequired) keywords.push("电梯可达");
     if (constraints.accessibility.accessibleRestroomRequired) keywords.push("无障碍卫生间", "商场", "博物馆");
     if (constraints.accessibility.frequentRestRequired) keywords.push("休息区", "公园", "咖啡");
-    return [...new Set(keywords.map((keyword) => keyword.trim()).filter(Boolean))].slice(0, 14);
+    if (constraints.discoveryPolicy.noveltyPreference === "long_tail") {
+      keywords.push("古着店", "唱片店", "独立小店", "社区甜品", "工作室", "菜市场");
+    }
+    return [...new Set(keywords.map((keyword) => keyword.trim()).filter(Boolean))].slice(0, 12);
   }
 
   private preferredPoiCategories(state: CityWalkGraphState): Set<RouteStop["category"]> {
@@ -2542,7 +2919,22 @@ export class CityWalkGraphRunner {
     if (/公园|绿地|花园|湖/.test(text)) categories.add("park");
     if (/餐厅|饭店|吃饭|美食/.test(text)) categories.add("restaurant");
     if (/商场|购物中心/.test(text)) categories.add("mall");
-    if (/景点|街区|街巷|老街|古迹|历史风貌|历史建筑|夜景/.test(text)) categories.add("sight");
+    if (/古着|唱片|买手|花店|杂货|文创|二手|旧货|独立小店|主理人/.test(text)) categories.add("shop");
+    if (/菜市场|市集|市场|街市/.test(text)) categories.add("market");
+    if (/工作室|工坊|手作|独立画廊|艺术家空间/.test(text)) categories.add("studio");
+    if (/街区|街巷|老街|胡同|小巷|街角|天桥|步道|河岸|建筑立面|城市肌理/.test(text)) categories.add("street_scene");
+    if (/活动|展会|节庆|快闪|音乐节/.test(text)) categories.add("event");
+    if (/景点|古迹|历史风貌|历史建筑|夜景|地标/.test(text)) categories.add("sight");
+    // A long-tail discovery policy is an operational preference, not merely a
+    // web-search switch. Give independent shops, markets, studios and street
+    // scenes the same category priority as explicit user keywords so a generic
+    // default sight cannot crowd them out during final stop selection.
+    if (state.constraints.discoveryPolicy.noveltyPreference === "long_tail") {
+      categories.add("shop");
+      categories.add("market");
+      categories.add("studio");
+      categories.add("street_scene");
+    }
     for (const removed of this.removedPoiCategories(state.task)) categories.delete(removed);
     return categories;
   }
@@ -2597,7 +2989,7 @@ export class CityWalkGraphRunner {
     if (state.selectedStops.some((stop) => stop.city && !this.sameCity(stop.city, state.constraints.city))) {
       violations.push(`路线包含不属于${state.constraints.city}的跨城市点位`);
     }
-    if (state.weatherRisk === "high" && state.selectedStops.some((stop) => ["park", "sight"].includes(stop.category))) {
+    if (state.weatherRisk === "high" && state.selectedStops.some((stop) => ["park", "sight", "street_scene"].includes(stop.category))) {
       violations.push("天气风险较高但路线包含户外点位");
     }
     if (state.constraints.budget != null && state.totalEstimatedCost > state.constraints.budget) {
@@ -2675,7 +3067,7 @@ export class CityWalkGraphRunner {
 
     if (correction.includes("天气")) {
       // Don't remove the user-specified endpoint
-      stops = stops.filter((stop) => isEndpoint(stop) || !["park", "sight"].includes(stop.category));
+      stops = stops.filter((stop) => isEndpoint(stop) || !["park", "sight", "street_scene"].includes(stop.category));
       const indoorCandidates = state.candidatePois.filter((poi) => poi.indoor && !stops.some((stop) => stop.name === poi.name));
       for (const poi of indoorCandidates) {
         if (stops.length >= 3) break;
@@ -2688,6 +3080,7 @@ export class CityWalkGraphRunner {
         !this.isNonVisitPoi(poi)
         && !this.isUnsuitableForParty(poi, state.constraints)
         && !this.isUnsuitableForAccessibility(poi, state.constraints)
+        && !this.isUnsuitableForDiscoveryPolicy(poi, state.constraints)
         && !stops.some((stop) => stop.name === poi.name)
       ).sort((left, right) => {
         const accessibilityPriority = (poi: Poi) =>
@@ -2709,7 +3102,10 @@ export class CityWalkGraphRunner {
     if (correction.includes("风格一致性")) {
       stops = stops.filter((stop) => isEndpoint(stop) || ((stop.styleScore ?? 0) >= 0.25 && !(stop.styleMatches?.length === 0 && stop.styleScore == null)));
       const styleCandidates = state.candidatePois
-        .filter((poi) => !this.isNonVisitPoi(poi) && !this.isUnsuitableForParty(poi, state.constraints) && !this.isUnsuitableForStyle(poi, state.constraints))
+        .filter((poi) => !this.isNonVisitPoi(poi)
+          && !this.isUnsuitableForParty(poi, state.constraints)
+          && !this.isUnsuitableForDiscoveryPolicy(poi, state.constraints)
+          && !this.isUnsuitableForStyle(poi, state.constraints))
         .sort((left, right) => this.poiSuitabilityScore(right, state) - this.poiSuitabilityScore(left, state));
       for (const poi of styleCandidates) {
         if (stops.length >= (state.constraints.experience.pace === "relaxed" ? 3 : 4)) break;
@@ -2981,9 +3377,11 @@ export class CityWalkGraphRunner {
       summary: `${state.constraints.city}天气数据不可用`,
       rainProbability: 0,
       risk: state.weatherRisk ?? "low",
+      decisionUsable: false,
+      forecastKind: "unavailable" as const,
       indices: []
     };
-    const routeRisk = state.weatherRisk ?? weather.risk;
+    const routeRisk = state.weatherRisk ?? (weather.decisionUsable !== false ? weather.risk : "unknown");
     const accessibilityNote = this.describeAccessibility(state.constraints.accessibility);
     const effectiveMaxLegMinutes = this.effectiveMaxLegMinutes(state.constraints);
     const importantNotes = [
@@ -2992,6 +3390,9 @@ export class CityWalkGraphRunner {
       accessibilityNote ? `无障碍硬约束：${accessibilityNote}` : undefined,
       accessibilityNote ? "地图 POI 不保证设施实时准确，出发前请向场馆确认无台阶入口、电梯和无障碍卫生间可用性。" : undefined,
       this.describeStyle(state.constraints.style) ? `风格：${this.describeStyle(state.constraints.style)}` : undefined,
+      state.constraints.temporal.precision !== "unspecified"
+        ? `出行时间：${describeTravelTemporal(state.constraints.temporal)}${state.constraints.temporal.inferred ? "（时刻为时段默认值，可继续修改）" : ""}`
+        : "尚未指定出行时间，天气不会参与本次路线选点；补充日期和时刻后可重新校验。",
       state.constraints.budget != null ? `预算：¥${state.constraints.budget}，当前估算¥${state.totalEstimatedCost}` : undefined,
       effectiveMaxLegMinutes ? `单段步行尽量不超过 ${effectiveMaxLegMinutes} 分钟；公交地铁段不计入步行上限` : undefined,
       state.constraints.endPoint ? `指定终点：${state.constraints.endPoint}` : undefined,
@@ -3002,7 +3403,10 @@ export class CityWalkGraphRunner {
       ...state.corrections.slice(-2)
     ].filter((item): item is string => Boolean(item));
     const advice = [
-      routeRisk === "high" ? "优先执行室内站点，并准备雨具或备选交通。" : routeRisk === "medium" ? "天气或环境条件一般，请结合生活指数做好防晒、防暑、雨具等防护。" : "天气风险较低，可按计划出发。",
+      routeRisk === "unknown" ? "缺少可用于本次行程的天气预报，请补充或调整出行时间后重新查询。"
+        : routeRisk === "high" ? "优先执行室内站点，并准备雨具或备选交通。"
+          : routeRisk === "medium" ? "天气或环境条件一般，请结合生活指数做好防晒、防暑、雨具等防护。"
+            : "出行时段天气风险较低，可按计划出发。",
       weather.airQuality && weather.airQuality.aqi >= 100 ? "空气质量一般，敏感人群应减少长时间户外停留。" : undefined,
       weather.warning ? `关注${weather.warning.title}。` : undefined,
       ...weather.indices.slice(0, 2).map((index) => `${index.name}：${index.category}`)
@@ -3014,7 +3418,14 @@ export class CityWalkGraphRunner {
       endPoint: state.constraints.endPoint,
       stopCount: state.selectedStops.length,
       partyLabel: this.describeParty(state.constraints.party),
-      time: { totalMinutes: state.totalEstimatedMinutes, travelMinutes, stayMinutes },
+      time: {
+        totalMinutes: state.totalEstimatedMinutes,
+        travelMinutes,
+        stayMinutes,
+        startAt: state.constraints.temporal.departureAt,
+        endAt: state.selectedStops.at(-1)?.estimatedDepartureAt,
+        precision: state.constraints.temporal.precision
+      },
       cost: {
         total: state.totalEstimatedCost,
         perPerson: state.constraints.party.total > 0 ? Math.round(state.totalEstimatedCost / state.constraints.party.total) : undefined,
@@ -3024,6 +3435,10 @@ export class CityWalkGraphRunner {
         summary: weather.summary,
         risk: routeRisk,
         rainProbability: weather.rainProbability,
+        decisionUsable: weather.decisionUsable,
+        forecastKind: weather.forecastKind,
+        targetDate: weather.targetDate,
+        timeRange: weather.timeRange,
         airQuality: weather.airQuality ? { aqi: weather.airQuality.aqi, category: weather.airQuality.category } : undefined,
         warning: weather.warning ? `${weather.warning.title}（${weather.warning.level}）` : undefined,
         advice
@@ -3035,6 +3450,35 @@ export class CityWalkGraphRunner {
 
   private completeStep(steps: AgentPlanStep[], stepId: string): AgentPlanStep[] {
     return steps.map((item) => (item.id === stepId ? { ...item, status: "completed" } : item));
+  }
+
+  private ensureSkillPlanSteps(steps: AgentPlanStep[], skills?: CompiledAgentSkills): AgentPlanStep[] {
+    if (!skills?.requiredTools.length) return steps;
+    const aliases: Record<string, AgentPlanStep["toolHint"]> = {
+      weather: "weather",
+      poi_search: "poi_search",
+      route_plan: "route_plan",
+      constraint_check: "constraint_check"
+    };
+    const existing = new Set(steps.map((step) => step.toolHint));
+    const result = [...steps];
+    for (const required of skills.requiredTools) {
+      const toolHint = aliases[required];
+      if (!toolHint || existing.has(toolHint)) continue;
+      const id = `${toolHint}_skill`;
+      const previous = result.at(-1)?.id;
+      result.push({
+        id,
+        description: skills.outputRules.length
+          ? `${required === "weather" ? "核对天气" : "搜索候选地点"}，并执行 Skill 输出要求：${skills.outputRules.join("；")}`
+          : required === "weather" ? "核对路线时段天气与风险。" : "搜索 Skill 要求的候选地点。",
+        toolHint,
+        dependsOn: previous ? [previous] : [],
+        status: "pending"
+      });
+      existing.add(toolHint);
+    }
+    return result;
   }
 
   private withRouteLegLabels(
@@ -3071,9 +3515,12 @@ export class CityWalkGraphRunner {
         used_budget: state.totalEstimatedCost,
         duration_minutes: state.constraints.durationMinutes,
         used_minutes: state.totalEstimatedMinutes,
+        temporal: state.constraints.temporal,
         party: state.constraints.party,
         experience: state.constraints.experience,
         style: state.constraints.style,
+        discovery_mode: state.constraints.discoveryMode,
+        discovery_policy: state.constraints.discoveryPolicy,
         constraint_ledger: state.constraints.constraintLedger,
         selected_pois: state.selectedStops.map((stop) => stop.name),
         weather_risk: state.weatherRisk
@@ -3089,7 +3536,12 @@ export class CityWalkGraphRunner {
       museum: 60,
       mall: 45,
       park: 40,
-      restaurant: 55
+      restaurant: 55,
+      shop: 30,
+      market: 35,
+      studio: 40,
+      street_scene: 20,
+      event: 50
     };
     return minutes[category];
   }
@@ -3424,8 +3876,20 @@ export class CityWalkGraphRunner {
     return undefined;
   }
 
+  private matchDiscoveryMode(task: string): PlaceDiscoveryMode | undefined {
+    if (/小众|冷门|宝藏|隐藏|独立小店|本地人|社区感|非景点|避开景点|不要景点|古着|唱片店|买手店|主理人|旧货|二手店|城市肌理|烟火气/u.test(task)) {
+      return "hidden_gems";
+    }
+    if (/经典地标|热门景点|必去|第一次去|稳妥|只要可核验|只推荐地图有的/u.test(task)) return "reliable";
+    return undefined;
+  }
+
   private matchExplicitPreferences(task: string): string[] {
-    const allPrefs = ["书店", "咖啡", "博物馆", "美术馆", "展览", "公园", "街区", "商场", "美食", "餐厅", "景点", "奶茶", "甜品", "影院"];
+    const allPrefs = [
+      "书店", "咖啡", "博物馆", "美术馆", "展览", "公园", "街区", "商场", "美食", "餐厅", "景点", "奶茶", "甜品", "影院",
+      "古着店", "古着", "唱片店", "买手店", "花店", "杂货店", "文创店", "二手店", "旧货店", "独立小店",
+      "菜市场", "市集", "街市", "工作室", "工坊", "手作空间", "胡同", "小巷", "街角", "天桥", "步道", "河岸"
+    ];
     return allPrefs.filter((keyword) => task.includes(keyword));
   }
 
@@ -3437,9 +3901,10 @@ export class CityWalkGraphRunner {
       : input.peopleCount ? `，同行${input.peopleCount}人` : "";
     const experienceNote = input.experience?.familyFriendly ? "，亲子友好" : "";
     const styleNote = input.styleDescription ? `，风格为${input.styleDescription}` : input.style?.summary ? `，风格为${input.style.summary}` : "";
+    const temporalNote = input.temporal ? `，出行时间${describeTravelTemporal(resolveTravelTemporal(input.temporal))}` : "";
     const city = this.normalizeCityName(input.city) ?? UNSPECIFIED_CITY;
     const startPoint = input.startPoint?.trim() ?? this.defaultStartPointForCity(city);
-    return `${city} CityWalk：从${startPoint}出发，${timeNote}${budgetNote}${partyNote}${experienceNote}${styleNote}，偏好${(input.preferences ?? ["书店", "咖啡"]).join("、")}`;
+    return `${city} CityWalk：从${startPoint}出发，${timeNote}${budgetNote}${partyNote}${experienceNote}${styleNote}${temporalNote}，偏好${(input.preferences ?? ["书店", "咖啡"]).join("、")}`;
   }
 }
 

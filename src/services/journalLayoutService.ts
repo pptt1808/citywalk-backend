@@ -46,6 +46,26 @@ function partitionBlocks(blocks: JournalLayoutBlockInput[]): JournalLayoutBlockI
   return groups;
 }
 
+function partitionJourneyBlocks(blocks: JournalLayoutBlockInput[]): JournalLayoutBlockInput[][] {
+  const groups: JournalLayoutBlockInput[][] = [];
+  let pending: JournalLayoutBlockInput[] = [];
+  for (let index = 0; index < blocks.length;) {
+    const momentId = blocks[index].journeyMomentId;
+    const related: JournalLayoutBlockInput[] = [];
+    while (index < blocks.length && momentId && blocks[index].journeyMomentId === momentId) related.push(blocks[index++]);
+    if (!momentId) related.push(blocks[index++]);
+    if (related.length > 1) {
+      if (pending.length) groups.push(pending.splice(0));
+      for (let offset = 0; offset < related.length; offset += 2) groups.push(related.slice(offset, offset + 2));
+    } else {
+      pending.push(related[0]);
+      if (pending.length === 2) groups.push(pending.splice(0));
+    }
+  }
+  if (pending.length) groups.push(pending);
+  return groups;
+}
+
 function clamp(value: number | undefined, min: number, max: number, fallback: number): number {
   const finite = typeof value === "number" && Number.isFinite(value) ? value : fallback;
   return Math.round(Math.max(min, Math.min(max, finite)) * 10) / 10;
@@ -206,7 +226,10 @@ function safePlacements(
 
 function fallbackPlan(input: JournalLayoutRequest): JournalLayoutResponse {
   const accents = JOURNAL_ACCENTS as readonly JournalAccent[];
-  const spreads = partitionBlocks(input.blocks).map((blocks, index): JournalSpreadPlan => {
+  const blockGroups = input.narrativeMode === "route-journey"
+    ? partitionJourneyBlocks(input.blocks)
+    : partitionBlocks(input.blocks);
+  const spreads = blockGroups.map((blocks, index): JournalSpreadPlan => {
     const anchorPage: JournalSpreadPlan["anchorPage"] = blocks.length === 2 ? "split" : index % 2 ? "right" : "left";
     return {
       id: `spread_${randomUUID()}`,
@@ -229,10 +252,10 @@ function fallbackPlan(input: JournalLayoutRequest): JournalLayoutResponse {
   };
 }
 
-function normalizeAiPlan(input: JournalLayoutRequest, response: JournalLayoutResponse): JournalLayoutResponse {
+export function normalizeAiPlan(input: JournalLayoutRequest, response: JournalLayoutResponse): JournalLayoutResponse {
   const allowed = new Set(input.blocks.map((block) => block.id));
   const seen = new Set<string>();
-  const spreads: JournalSpreadPlan[] = response.spreads.flatMap((spread, index): JournalSpreadPlan[] => {
+  let spreads: JournalSpreadPlan[] = response.spreads.flatMap((spread, index): JournalSpreadPlan[] => {
     const blockIds = spread.blockIds.filter((id) => allowed.has(id) && !seen.has(id)).slice(0, 2);
     blockIds.forEach((id) => seen.add(id));
     let anchorPage: JournalSpreadPlan["anchorPage"] = blockIds.length === 2
@@ -254,6 +277,40 @@ function normalizeAiPlan(input: JournalLayoutRequest, response: JournalLayoutRes
   const missing = input.blocks.filter((block) => !seen.has(block.id));
   if (missing.length) spreads.push(...fallbackPlan({ ...input, blocks: missing }).spreads);
   if (!spreads.length && input.blocks.length) return fallbackPlan(input);
+  if (input.narrativeMode === "route-journey") {
+    const sourceOrder = new Map(input.blocks.map((block, index) => [block.id, index]));
+    const orderedBlocks = [...input.blocks].sort((left, right) => {
+      const leftJourney = left.journeyOrder;
+      const rightJourney = right.journeyOrder;
+      if (leftJourney !== undefined || rightJourney !== undefined) {
+        if (leftJourney === undefined) return 1;
+        if (rightJourney === undefined) return -1;
+        if (leftJourney !== rightJourney) return leftJourney - rightJourney;
+      }
+      return (sourceOrder.get(left.id) ?? 0) - (sourceOrder.get(right.id) ?? 0);
+    });
+    const placementById = new Map(spreads.flatMap((spread) => spread.placements ?? []).map((placement) => [placement.blockId, placement]));
+    const spreadByBlock = new Map(spreads.flatMap((spread) => spread.blockIds.map((blockId) => [blockId, spread] as const)));
+    spreads = partitionJourneyBlocks(orderedBlocks).map((blocks, index): JournalSpreadPlan => {
+      const blockIds = blocks.map((block) => block.id);
+      const anchorPage: JournalSpreadPlan["anchorPage"] = blocks.length === 2 ? "split" : index % 2 ? "right" : "left";
+      const template = spreadByBlock.get(blockIds[0]) ?? spreads[index]
+        ?? fallbackPlan({ ...input, blocks }).spreads[0];
+      const rawPlacements = blockIds.flatMap((blockId) => {
+        const placement = placementById.get(blockId);
+        return placement ? [placement] : [];
+      });
+      return {
+        ...template,
+        id: template?.id || `spread_${randomUUID()}`,
+        blockIds,
+        anchorPage,
+        placements: safePlacements(input, blockIds, rawPlacements, index, anchorPage),
+        visualDirection: safeVisualDirection(template?.visualDirection, index, anchorPage),
+        rationale: `按漫步顺序连接第 ${blocks[0].journeyOrder !== undefined ? blocks[0].journeyOrder + 1 : index * 2 + 1} 个沿途片段`
+      };
+    });
+  }
   const previous = input.currentRecipes ?? [];
   const sameSequence = spreads.length === previous.length
     && spreads.every((spread, index) => spread.recipe === previous[index]);

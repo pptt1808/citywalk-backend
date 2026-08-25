@@ -3,16 +3,12 @@ import { inject, computed, ref, watch } from 'vue'
 import { PhArrowSquareOut, PhHeart, PhMapPinLine, PhMapTrifold, PhNavigationArrow, PhPath } from '@phosphor-icons/vue'
 import type { useAgentPlan } from '../composables/useAgentPlan'
 import { CAT_LABEL } from '../constants'
-import { apiFavoriteRoute, apiListFavoriteRoutes, apiUnfavoriteRoute, type PlanningResult, type RouteLeg } from '../api/agent'
+import { apiFavoriteRoute, apiListFavoriteRoutes, apiSendRouteToMobile, apiUnfavoriteRoute, type PlanningResult, type RouteLeg } from '../api/agent'
 import { getMemoryUserId } from '../utils/identity'
 import RouteMap from './RouteMap.vue'
-import type { JournalController } from '../composables/useJournal'
-import type { NavigateWorkspace } from '../workspace'
 
 const agent = inject<ReturnType<typeof useAgentPlan>>('agent')!
 const props = defineProps<{ value?: PlanningResult }>()
-const journal = inject<JournalController>('journal')!
-const navigate = inject<NavigateWorkspace>('navigate')!
 const result = computed(() => props.value ?? agent.result.value)
 const isRoute = computed(() => (result.value?.responseKind ?? 'route') === 'route')
 const favoriteUserId = getMemoryUserId()
@@ -20,9 +16,12 @@ const favoriteId = ref<string | null>(null)
 const favoriteBusy = ref(false)
 const favoriteError = ref<string | null>(null)
 const copiedTone = ref<string | null>(null)
+const handoffBusy = ref(false)
+const handoffSent = ref(false)
 
 watch(result, async (value) => {
   favoriteId.value = null
+  handoffSent.value = false
   if (!value || !isRoute.value || !favoriteUserId) return
   try {
     const data = await apiListFavoriteRoutes(favoriteUserId)
@@ -48,6 +47,7 @@ async function toggleFavorite() {
       const saved = await apiFavoriteRoute(favoriteUserId, result.value.historyId)
       favoriteId.value = saved.id
     }
+    window.dispatchEvent(new CustomEvent('citywalk:favorites-changed'))
   } catch (error) {
     favoriteError.value = error instanceof Error ? error.message : '收藏操作失败，请稍后重试'
   } finally {
@@ -55,10 +55,18 @@ async function toggleFavorite() {
   }
 }
 
-function startWalk() {
-  if (!result.value || !isRoute.value) return
-  journal.startWalk(result.value)
-  navigate('walk')
+async function sendToMobile() {
+  if (!result.value || !isRoute.value || handoffBusy.value) return
+  handoffBusy.value = true
+  favoriteError.value = null
+  try {
+    await apiSendRouteToMobile(result.value)
+    handoffSent.value = true
+  } catch (error) {
+    favoriteError.value = error instanceof Error ? error.message : '路线发送到手机失败'
+  } finally {
+    handoffBusy.value = false
+  }
 }
 
 async function copyVariant(tone: string, text: string, hashtags: string[]) {
@@ -115,6 +123,13 @@ function fmtTime(m: number): string {
 function fmtDist(m: number): string {
   return m >= 1000 ? (m / 1000).toFixed(1) + ' km' : m + ' m'
 }
+function fmtClock(value?: string): string {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isFinite(date.getTime())
+    ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(date)
+    : ''
+}
 
 function legForStop(index: number): RouteLeg | undefined {
   const stop = result.value?.stops[index]
@@ -129,6 +144,16 @@ const intentLabel = computed(() => ({
 
 <template>
   <div class="result-view" v-if="result">
+    <section v-if="result.skillExecutions?.length" class="skill-execution-summary" aria-label="Skill 执行结果">
+      <div class="skill-execution-heading"><strong>本轮已应用能力</strong><small>当前用户要求优先；冲突与未识别规则会明确标出</small></div>
+      <div class="skill-execution-list">
+        <article v-for="execution in result.skillExecutions" :key="execution.skillId" :class="`skill-execution ${execution.status}`">
+          <strong>{{ execution.name }}</strong><span>{{ execution.status === 'applied' ? '已应用' : execution.status === 'partially_applied' ? '部分应用' : '未应用' }}</span>
+          <small v-if="execution.overriddenRules.length">已被本轮要求覆盖：{{ execution.overriddenRules.join('；') }}</small>
+          <small v-if="execution.unsupportedRules.length">仍需人工确认：{{ execution.unsupportedRules.join('；') }}</small>
+        </article>
+      </div>
+    </section>
 
     <div v-if="!isRoute" class="answer-view">
       <div class="answer-hero">
@@ -154,10 +179,17 @@ const intentLabel = computed(() => ({
         <p v-if="result.comparison.missingInformation?.length" class="muted">还缺少：{{ result.comparison.missingInformation.join('、') }}</p>
       </div>
       <div v-if="result.socialCopy?.variants.length" class="copy-list">
+        <p v-if="result.socialCopy.generationDiagnostics?.regeneration?.attempted" class="copy-diagnostic">
+          已根据「{{ result.socialCopy.generationDiagnostics.regeneration.reasons.join('；') }}」重新生成一次<span v-if="result.socialCopy.generationDiagnostics.fallbackTriggered">，第二次仍未完全满足约束，已保留安全版本。</span><span v-else>，本次已通过约束检查。</span>
+        </p>
+        <div v-if="result.socialCopy.styleProfile" class="copy-style-summary">
+          <span>本次声口</span><strong>{{ result.socialCopy.styleProfile.label }}</strong>
+          <p>{{ result.socialCopy.styleProfile.signature.narrativeMove }}</p>
+        </div>
         <div v-for="variant in result.socialCopy.variants" :key="variant.tone" class="copy-card">
           <div><strong>{{ variant.tone }}</strong><button class="copy-btn" @click="copyVariant(variant.tone, variant.text, variant.hashtags)">{{ copiedTone === variant.tone ? '已复制' : '复制' }}</button></div>
           <p>{{ variant.text }}</p>
-          <small>{{ variant.hashtags.map(tag => `#${tag}`).join(' ') }}</small>
+          <small v-if="variant.hashtags.length">{{ variant.hashtags.map(tag => `#${tag}`).join(' ') }}</small>
         </div>
       </div>
       <div v-if="result.sources?.length" class="sources-card">
@@ -188,21 +220,21 @@ const intentLabel = computed(() => ({
         </div>
       </div>
       <div class="hero-stats">
-        <div class="hstat"><span class="hstat-lbl">预计耗时</span><span class="hstat-val">{{ fmtTime(result.totalEstimatedMinutes) }}</span><small>移动 {{ fmtTime(routeMins) }} · 停留 {{ fmtTime(stayMins) }}</small></div>
+        <div class="hstat"><span class="hstat-lbl">预计耗时</span><span class="hstat-val">{{ fmtTime(result.totalEstimatedMinutes) }}</span><small v-if="result.routeOverview?.time.startAt">{{ fmtClock(result.routeOverview.time.startAt) }}–{{ fmtClock(result.routeOverview.time.endAt) }} · 移动 {{ fmtTime(routeMins) }}</small><small v-else>移动 {{ fmtTime(routeMins) }} · 停留 {{ fmtTime(stayMins) }}</small></div>
         <div class="hstat"><span class="hstat-lbl">预计花费</span><span class="hstat-val">¥{{ result.totalEstimatedCost }}</span><small v-if="result.routeOverview?.cost.perPerson">约人均 ¥{{ result.routeOverview.cost.perPerson }}</small><small v-else>按当前同行人数估算</small></div>
         <div class="hstat"><span class="hstat-lbl">路线规模</span><span class="hstat-val">{{ result.stops.length }} 个地点</span><small>从 {{ result.routeOverview?.startPoint || '起点' }} 出发</small></div>
-        <div class="hstat"><span class="hstat-lbl">当日天气</span><span class="hstat-val" :class="weatherInfo.cls">{{ weatherInfo.text }}</span><small>{{ result.routeOverview?.weather.summary || '暂无天气摘要' }}</small></div>
+        <div class="hstat"><span class="hstat-lbl">出行时段天气</span><span class="hstat-val" :class="weatherInfo.cls">{{ weatherInfo.text }}</span><small>{{ result.routeOverview?.weather.summary || '暂无天气摘要' }}</small></div>
       </div>
       <div class="route-sequence" aria-label="路线顺序">
         <span class="sequence-start"><small>起点</small><strong>{{ result.routeOverview?.startPoint || '起点' }}</strong></span>
         <template v-for="(stop, index) in result.stops" :key="stop.name">
           <i />
-          <span class="sequence-stop"><b>{{ String(index + 1).padStart(2, '0') }}</b><strong>{{ stop.name }}</strong></span>
+          <span class="sequence-stop"><b>{{ fmtClock(stop.estimatedArrivalAt) || String(index + 1).padStart(2, '0') }}</b><strong>{{ stop.name }}</strong></span>
         </template>
       </div>
       <div v-if="result.routeOverview" class="route-briefing">
         <section v-if="visibleImportantNotes.length" class="important-notes"><strong>出发前留意</strong><ul><li v-for="note in visibleImportantNotes" :key="note">{{ note }}</li></ul></section>
-        <section class="weather-detail"><strong>天气补充</strong><p>降雨概率 {{ result.routeOverview.weather.rainProbability }}%<span v-if="result.routeOverview.weather.airQuality"> · AQI {{ result.routeOverview.weather.airQuality.aqi }}，{{ result.routeOverview.weather.airQuality.category }}</span></p><ul v-if="result.routeOverview.weather.advice.length"><li v-for="advice in result.routeOverview.weather.advice" :key="advice">{{ advice }}</li></ul></section>
+        <section class="weather-detail"><strong>天气补充</strong><p v-if="result.routeOverview.weather.decisionUsable !== false">降雨概率 {{ result.routeOverview.weather.rainProbability }}%<span v-if="result.routeOverview.weather.airQuality"> · AQI {{ result.routeOverview.weather.airQuality.aqi }}，{{ result.routeOverview.weather.airQuality.category }}</span></p><p v-else>缺少与本次出行时间匹配的天气数据</p><ul v-if="result.routeOverview.weather.advice.length"><li v-for="advice in result.routeOverview.weather.advice" :key="advice">{{ advice }}</li></ul></section>
       </div>
       <section v-if="routeTradeoffs.length" class="tradeoff-section" aria-label="约束冲突与当前取舍">
         <div class="tradeoff-heading"><div><strong>约束冲突与当前取舍</strong><small>你可以按下面的备选方向继续修改路线</small></div></div>
@@ -226,9 +258,9 @@ const intentLabel = computed(() => ({
             <PhHeart :size="17" :weight="favoriteId ? 'fill' : 'regular'" />
             {{ favoriteId ? '已收藏' : '收藏路线' }}
           </button>
-          <button class="start-walk-btn" @click="startWalk">
+          <button class="start-walk-btn" :disabled="handoffBusy" @click="sendToMobile">
             <PhNavigationArrow :size="17" weight="fill" />
-            现在出发
+            {{ handoffBusy ? '发送中…' : handoffSent ? '已发送到手机' : '发送到手机' }}
           </button>
         </div>
       </div>
@@ -251,12 +283,14 @@ const intentLabel = computed(() => ({
             <div class="tl-leg-icon">{{ transportLabel(legForStop(idx)!.mode) }}</div>
             <div class="tl-leg-body">
               <span class="tl-leg-mode">{{ legForStop(idx)!.originName ?? legForStop(idx)!.origin }} → {{ legForStop(idx)!.destinationName ?? legForStop(idx)!.destination }}</span>
-              <span class="tl-leg-dist">{{ fmtDist(legForStop(idx)!.distanceMeters) }} · {{ legForStop(idx)!.durationMinutes }} 分钟<span v-if="legForStop(idx)!.estimated"> · 示意估算</span></span>
+              <span v-if="legForStop(idx)!.samePlaceTransfer" class="tl-leg-dist">同一场馆或相邻入口内移动<span v-if="legForStop(idx)!.durationMinutes"> · 约 {{ legForStop(idx)!.durationMinutes }} 分钟</span></span>
+              <span v-else class="tl-leg-dist">{{ fmtDist(legForStop(idx)!.distanceMeters) }} · {{ legForStop(idx)!.durationMinutes }} 分钟<span v-if="legForStop(idx)!.estimated"> · 示意估算</span></span>
+              <span v-if="legForStop(idx)!.fallbackReason" class="tl-leg-note">{{ legForStop(idx)!.fallbackReason }}</span>
             </div>
           </div>
           <div class="tl-top">
             <h3 class="tl-name">{{ stop.name }}</h3>
-            <span class="tl-tag">{{ CAT_LABEL[stop.category] }}</span>
+            <span class="tl-tag">{{ CAT_LABEL[stop.category] }}<template v-if="stop.subtype"> · {{ stop.subtype }}</template></span>
             <span class="tl-cost"><small>预计</small> ¥{{ stop.estimatedCost }}</span>
           </div>
 
@@ -273,8 +307,11 @@ const intentLabel = computed(() => ({
 
           <div class="tl-meta">
             <span class="tl-chip star" v-if="stop.rating">评分 {{ stop.rating.toFixed(1) }}</span>
+            <span class="tl-chip" v-if="stop.estimatedArrivalAt">{{ fmtClock(stop.estimatedArrivalAt) }} 到达 · {{ fmtClock(stop.estimatedDepartureAt) }} 离开</span>
             <span class="tl-chip">建议停留 {{ fmtTime(stop.estimatedStayMinutes) }}</span>
             <span class="tl-chip" v-if="stop.distanceMeters">距起点 {{ fmtDist(stop.distanceMeters) }}</span>
+            <span class="tl-chip discovery" v-if="stop.discoverySource === 'web' && stop.verificationStatus === 'map_matched'">公开发现 · 高德核验</span>
+            <a v-if="stop.evidenceUrls?.[0]" class="tl-source-link" :href="stop.evidenceUrls[0]" target="_blank" rel="noopener noreferrer">查看发现来源</a>
           </div>
 
           <div v-if="stop.costBreakdown || stop.bookingInfo" class="tl-info-grid">
@@ -328,6 +365,7 @@ const intentLabel = computed(() => ({
   border-radius: 999px; padding: 9px 15px; font: inherit; font-size: 13px; font-weight: 650;
   cursor: pointer; white-space: nowrap;
 }
+.skill-execution-summary{padding:14px 16px;border:1px solid var(--border-subtle);border-radius:var(--radius);background:rgba(255,255,255,.58)}.skill-execution-heading{display:flex;align-items:baseline;gap:10px}.skill-execution-heading strong{color:var(--primary);font-size:14px}.skill-execution-heading small{color:var(--text-muted);font-size:11px}.skill-execution-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.skill-execution{display:grid;grid-template-columns:auto auto;gap:2px 7px;padding:7px 10px;border-radius:10px;background:var(--surface-container)}.skill-execution strong{font-size:12px}.skill-execution span{font-size:11px;color:var(--secondary)}.skill-execution small{grid-column:1/-1;color:var(--text-muted);font-size:10px;line-height:1.4}.skill-execution.partially_applied span{color:#936000}.skill-execution.skipped span{color:#93000a}
 .favorite-btn.saved { background: #fff5f0; }
 .favorite-btn:disabled { opacity: .55; cursor: wait; }
 .start-walk-btn { border: 1px solid var(--primary); background: var(--primary); color: #fff; border-radius: 999px; padding: 9px 15px; font: 700 13px var(--font-sans); cursor: pointer; box-shadow: 0 6px 15px rgba(151,68,0,.2); }
@@ -389,6 +427,11 @@ const intentLabel = computed(() => ({
 .answer-hero h1 { color: var(--text-h); font-size: 24px; margin: 2px 0 12px; }
 .answer-hero p, .comparison-card > p { color: var(--text); font-size: 15px; line-height: 1.8; }
 .answer-sections, .copy-list { display: grid; gap: 14px; }
+.copy-diagnostic { margin: 0; padding: 9px 12px; border-left: 3px solid var(--secondary); background: var(--surface-2); color: var(--text-muted); font-size: 12px; line-height: 1.55; }
+.copy-style-summary { display: grid; grid-template-columns: auto 1fr; gap: 5px 11px; padding: 15px 18px; border-left: 3px solid var(--secondary); background: var(--surface-2); }
+.copy-style-summary span { color: var(--text-muted); font-size: 12px; }
+.copy-style-summary strong { color: var(--text-h); font-size: 14px; }
+.copy-style-summary p { grid-column: 1 / -1; color: var(--text-muted); font-size: 13px; line-height: 1.65; }
 .answer-section h2, .comparison-card h2 { color: var(--text-h); font-size: 16px; margin-bottom: 12px; }
 .answer-section ul { display: grid; gap: 9px; padding-left: 20px; color: var(--text); line-height: 1.65; }
 .comparison-option { display: grid; gap: 8px; padding: 16px 0; border-top: 1px solid var(--border); }
@@ -421,6 +464,11 @@ const intentLabel = computed(() => ({
 .n-mall       { background: #ec4899; }
 .n-park       { background: #10b981; }
 .n-restaurant { background: #ef4444; }
+.n-shop       { background: #8a6754; }
+.n-market     { background: #b7791f; }
+.n-studio     { background: #7c5c8f; }
+.n-street_scene { background: #64748b; }
+.n-event      { background: #b45365; }
 .tl-line {
   width: 2px; flex: 1; min-height: 22px;
   background: linear-gradient(to bottom, var(--accent-border) 0%, var(--border) 60%, transparent 100%);
@@ -472,6 +520,8 @@ const intentLabel = computed(() => ({
 .tl-addr svg { flex-shrink: 0; opacity: .4; }
 
 .tl-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.tl-chip.discovery { color: #6f5143; background: #f7efe5; border-color: #dcc7b2; }
+.tl-source-link { align-self: center; color: #7a5a49; font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
 .tl-chip {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 13px; padding: 5px 12px; border-radius: 999px;
@@ -501,6 +551,7 @@ const intentLabel = computed(() => ({
 .tl-leg-body { display: flex; flex-direction: column; gap: 2px; }
 .tl-leg-mode { font-size: 14px; font-weight: 600; color: var(--text-h); }
 .tl-leg-dist { font-size: 13px; color: var(--text-muted); }
+.tl-leg-note { margin-top: 3px; font-size: 11px; line-height: 1.45; color: #8a674f; }
 
 /* Route card: one restrained travel-journal system, without mixed emoji colors. */
 .hero{gap:22px;padding:30px;background:#fffdf7;border-color:rgba(103,83,69,.2);border-radius:5px 18px 7px 15px;box-shadow:0 12px 28px rgba(72,54,42,.08)}

@@ -1,5 +1,6 @@
 import { env } from "../config/env";
 import { z } from "zod";
+import { cache } from "../utils/cache";
 import { ConversationMemoryMessage, MemoryCandidate, RecalledMemory } from "../types/memory";
 import {
   AgentIntent,
@@ -9,8 +10,15 @@ import {
   PoiCategory,
   PlanRequest,
   StyleIntent,
-  UserConstraints
+  UserConstraints,
+  WebDiscoveredPlace,
+  InformationSource
 } from "../types/plan";
+import {
+  SocialCopyBrief,
+  SocialCopySemanticReview,
+  hardConstraintIssues
+} from "../services/socialCopyService";
 import {
   JOURNAL_ACCENTS,
   JOURNAL_ACCENT_FORMS,
@@ -32,6 +40,10 @@ interface PoiEnrichmentInput {
   city: string;
 }
 
+// POI cost/stay/highlight estimates drift slowly; a day-level TTL is safe and
+// collapses repeated enrichment of the same places across turns and users.
+const POI_ENRICHMENT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
 interface PoiEnrichmentOutput {
   estimatedCost: number;
   estimatedStayMinutes: number;
@@ -43,8 +55,10 @@ interface PoiEnrichmentOutput {
 export interface StylePoiRankingInput {
   name: string;
   category: PoiCategory;
+  subtype?: string;
   address?: string;
   tags?: string[];
+  discoveryReasons?: string[];
 }
 
 export interface StylePoiRankingOutput {
@@ -56,23 +70,40 @@ export interface StylePoiRankingOutput {
 
 type ChatRole = "system" | "user" | "assistant";
 
+// Prompt structure convention: keep byte-stable content at the front of the
+// messages array so the provider's automatic prefix (KV) cache can hit.
+// Static system prompt first; inside user payloads put volatile fields
+// (timestamps, request ids, random seeds) last.
 interface ChatMessage {
   role: ChatRole;
   content: string;
 }
 
 interface LlmModelConfig {
-  provider: "deepseek-v4-flash" | "deepseek-v4-pro";
+  provider: "deepseek-v4-flash" | "deepseek-v4-pro" | "dots3";
   apiKey?: string;
   baseUrl: string;
   model: string;
   thinking: boolean;
+  /** Chat completions path on the provider; dot and DeepSeek use different paths. */
+  chatPath: string;
 }
 
 interface LlmJsonResult<T> {
   provider: string;
   model: string;
   data: T;
+}
+
+export interface SocialCopyGenerationResult extends LlmJsonResult<IntentResponsePayload> {
+  originalCandidates: Array<{ variantIndex: number; text: string; hashtags: string[] }>;
+  semanticReview?: SocialCopySemanticReview;
+  regeneration?: {
+    attempted: boolean;
+    attempts: number;
+    reasons: string[];
+    exhausted: boolean;
+  };
 }
 
 interface LlmCompletion<T> {
@@ -186,6 +217,29 @@ const flexibleStringArray = (max: number, itemMax = 100) => z.preprocess(
   z.array(z.coerce.string().min(1).max(itemMax)).max(max).optional()
 ).catch(undefined);
 
+// DeepSeek occasionally returns comparison dimensions as objects such as
+// {name, value} even though the public contract is string[].  Coercing those
+// objects with String(value) produces the unusable literal "[object Object]".
+// Preserve the dimension label (and its short value when present) instead.
+const flexibleDimensionArray = (max: number, itemMax = 180) => z.preprocess(
+  (value) => {
+    if (!Array.isArray(value)) return value;
+    return value.flatMap((item) => {
+      if (typeof item === "string") return item.trim() ? [item.trim()] : [];
+      if (!item || typeof item !== "object") return [];
+      const raw = item as Record<string, unknown>;
+      const label = raw.name ?? raw.dimension ?? raw.label ?? raw.title ?? raw.key;
+      if (label == null) return [];
+      const detail = raw.value ?? raw.summary ?? raw.description ?? raw.comparison;
+      const text = detail == null || String(detail).trim() === ""
+        ? String(label)
+        : `${String(label)}：${String(detail)}`;
+      return [text.trim()];
+    });
+  },
+  z.array(z.coerce.string().min(1).max(itemMax)).max(max).optional()
+).catch(undefined);
+
 function normalizeJournalRecipe(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const normalized = value.trim().toLowerCase().replace(/[\s_]+/gu, "-");
@@ -233,6 +287,35 @@ const StyleSchema = z.object({
   confidence: optionalScore.optional()
 }).optional().catch(undefined);
 
+const DiscoveryPolicySchema = z.preprocess((value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const raw = value as Record<string, unknown>;
+  const scopes = raw.exposureScopes ?? raw.exposureScope ?? raw.scope;
+  return {
+    ...raw,
+    exposureScopes: typeof scopes === "string" ? scopes.split(/[、,，\s]+/u).filter(Boolean) : scopes
+  };
+}, z.object({
+  sourcePolicy: z.enum(["map_only", "web_when_relevant", "web_assisted"]).optional().catch(undefined),
+  noveltyPreference: z.enum(["mainstream", "neutral", "long_tail"]).optional().catch(undefined),
+  avoidOverexposed: optionalBoolean,
+  exposureScopes: z.array(z.enum([
+    "all", "bookstore", "cafe", "sight", "museum", "mall", "park", "restaurant",
+    "shop", "market", "studio", "street_scene", "event"
+  ])).max(13).optional().catch(undefined),
+  exposureStrength: z.enum(["soft", "strict"]).optional().catch(undefined)
+}).optional().catch(undefined));
+
+const TemporalSchema = z.object({
+  timezone: z.literal("Asia/Shanghai").optional().catch(undefined),
+  visitDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u).optional().catch(undefined),
+  startTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/u).optional().catch(undefined),
+  departureAt: z.string().max(50).optional().catch(undefined),
+  period: z.enum(["morning", "afternoon", "evening", "night"]).optional().catch(undefined),
+  precision: z.enum(["exact", "period", "date_only", "unspecified"]).optional().catch(undefined),
+  sourceText: z.string().max(100).optional().catch(undefined)
+}).optional().catch(undefined);
+
 const ParsedConstraintsSchema = z.object({
   city: optionalText(80),
   startPoint: optionalText(120),
@@ -251,6 +334,9 @@ const ParsedConstraintsSchema = z.object({
   transportMode: TransportModeSchema,
   weatherPreference: z.enum(["avoid_rain", "indoor_first", "outdoor_ok"]).nullish().transform((value) => value ?? undefined).catch(undefined),
   weatherRisk: z.enum(["low", "medium", "high"]).nullish().transform((value) => value ?? undefined).catch(undefined),
+  temporal: TemporalSchema,
+  discoveryMode: z.enum(["reliable", "balanced", "hidden_gems"]).nullish().transform((value) => value ?? undefined).catch(undefined),
+  discoveryPolicy: DiscoveryPolicySchema,
   endPoint: optionalText(120),
   maxLegMinutes: optionalPositiveNumber,
   party: z.preprocess((value) => value === null ? undefined : value, z.object({
@@ -351,7 +437,8 @@ export class LlmRouter {
     apiKey: env.DEEPSEEK_FLASH_API_KEY,
     baseUrl: env.DEEPSEEK_FLASH_BASE_URL,
     model: env.DEEPSEEK_FLASH_MODEL,
-    thinking: false
+    thinking: false,
+    chatPath: this.normalizedChatPath()
   };
 
   private readonly advanced: LlmModelConfig = {
@@ -359,7 +446,19 @@ export class LlmRouter {
     apiKey: env.DEEPSEEK_PRO_API_KEY,
     baseUrl: env.DEEPSEEK_PRO_BASE_URL,
     model: env.DEEPSEEK_PRO_MODEL,
-    thinking: true
+    thinking: true,
+    chatPath: this.normalizedChatPath()
+  };
+
+  // 小红书 dots3（点点）OpenAI 兼容端点。只有显式以 "dot" 覆盖选择时才使用，
+  // 不会影响默认 DeepSeek 路径；未配置 DOT_API_KEY 时等同不可用。
+  private readonly dot: LlmModelConfig = {
+    provider: "dots3",
+    apiKey: env.DOT_API_KEY,
+    baseUrl: env.DOT_BASE_URL,
+    model: env.DOT_MODEL,
+    thinking: false,
+    chatPath: "/v1/chat/completions"
   };
 
   async parseConstraints(
@@ -378,7 +477,11 @@ export class LlmRouter {
       {
         role: "system",
         content:
-          "你是 CityWalk Pulse 的约束解析器。只输出 JSON，不要 Markdown。字段包括 city,startPoint,durationMinutes,budget,preferences,peopleCount,transportMode,weatherPreference,weatherRisk,endPoint,maxLegMinutes,party,experience,accessibility,style。party 可含 total,adults,children,childAges,seniors,stroller,mobilityNeeds；experience 可含 familyFriendly,pace(relaxed|normal|intensive),restStopRequired,restroomPreferred,avoidCrowds；accessibility 可含 wheelchairAccessRequired,stepFreeRequired,elevatorRequired,accessibleRestroomRequired,frequentRestRequired，这些字段是硬约束。轮椅/无障碍通行意味着 wheelchairAccessRequired 与 stepFreeRequired；明确要求电梯、无障碍卫生间或频繁休息时必须保留对应字段。style 是开放式语义画像，不要使用固定主题枚举：可含 rawText,summary,tags([{name,weight,evidence}]),desiredScenes([{description,importance,searchHints}]),avoidances,searchHints,narrativeArc,confidence。必须保留用户原始风格措辞，即使它是新颖或你无法归类的表达；将它解释成可检索的场景和审美特征，不要擅自替换成‘文艺/浪漫/自然’等笼统标签。必须保留同行人、亲子和无障碍语义，不要只输出总人数。关键规则：city 必须从用户输入中提取实际提到的城市名，如果输入明确提到了城市就提取它，不要替换为其他城市。确实找不到城市时才省略该字段或使用空值，严禁一律填「南京」。"
+          `你是 CityWalk Pulse 的约束解析器。只输出 JSON，不要 Markdown。字段包括 city,startPoint,durationMinutes,budget,preferences,peopleCount,transportMode,weatherPreference,weatherRisk,temporal,discoveryMode,discoveryPolicy,endPoint,maxLegMinutes,party,experience,accessibility,style。
+temporal 表示计划出行时间，不是请求发送时间：timezone 只使用 Asia/Shanghai；visitDate 使用 YYYY-MM-DD；startTime 使用 HH:mm；period 只能为 morning|afternoon|evening|night；precision 只能为 exact|period|date_only|unspecified；sourceText 保留用户时间原话。结合 user 消息里的 currentDateTime 解析“今天、明天、后天、周六、今晚”等相对时间。没有任何出行时间表达时省略 temporal，严禁擅自把当前时间当成出发时间。
+discoveryMode 是兼容旧客户端的摘要：强调经典地标、稳妥可核验为 reliable；普通探索为 balanced；强调小众、冷门、独立小店、非景点、本地生活为 hidden_gems。
+更精确的地点策略写入 discoveryPolicy：sourcePolicy(map_only|web_when_relevant|web_assisted) 表示来源策略；noveltyPreference(mainstream|neutral|long_tail) 表示经典或长尾倾向；avoidOverexposed 表示是否避开网红、爆火、刷屏或游客扎堆的地点；exposureScopes 只能使用 all,bookstore,cafe,sight,museum,mall,park,restaurant,shop,market,studio,street_scene,event，必须保留“仅餐饮别选网红店”这类作用范围；exposureStrength 为 soft|strict。可靠性、长尾程度和曝光回避是独立维度：“小众但只要地图有的”应为 map_only + long_tail；“经典建筑但餐饮别选网红店”应为 mainstream + avoidOverexposed=true + exposureScopes=[restaurant]，不得把整条路线改成 hidden_gems；全局“避开网红”使用 exposureScopes=[all]。
+party 可含 total,adults,children,childAges,seniors,stroller,mobilityNeeds；experience 可含 familyFriendly,pace(relaxed|normal|intensive),restStopRequired,restroomPreferred,avoidCrowds；accessibility 可含 wheelchairAccessRequired,stepFreeRequired,elevatorRequired,accessibleRestroomRequired,frequentRestRequired，这些字段是硬约束。轮椅/无障碍通行意味着 wheelchairAccessRequired 与 stepFreeRequired；明确要求电梯、无障碍卫生间或频繁休息时必须保留对应字段。style 是开放式语义画像，不要使用固定主题枚举：可含 rawText,summary,tags([{name,weight,evidence}]),desiredScenes([{description,importance,searchHints}]),avoidances,searchHints,narrativeArc,confidence。必须保留用户原始风格措辞，即使它是新颖或你无法归类的表达；将它解释成可检索的场景和审美特征，不要擅自替换成‘文艺/浪漫/自然’等笼统标签。必须保留同行人、亲子和无障碍语义，不要只输出总人数。关键规则：city 必须从用户输入中提取实际提到的城市名，如果输入明确提到了城市就提取它，不要替换为其他城市。确实找不到城市时才省略该字段或使用空值，严禁一律填「南京」。`
       },
       {
         role: "user",
@@ -386,7 +489,10 @@ export class LlmRouter {
           task,
           rawInput,
           memoryContext,
-          priority: "本轮 task/rawInput 明确字段 > 最近对话 > 长期记忆；不要从历史覆盖本轮明确要求"
+          timezone: "Asia/Shanghai",
+          priority: "本轮 task/rawInput 明确字段 > 最近对话 > 长期记忆；不要从历史覆盖本轮明确要求",
+          // Volatile field last: keeps the prefix above eligible for provider KV cache.
+          currentDateTime: new Date().toISOString()
         })
       }
     ], parseConstraintPayload, signal);
@@ -447,6 +553,7 @@ export class LlmRouter {
       conversation?: string;
       referenceRoute?: unknown;
       toolFacts?: unknown;
+      skillContext?: string;
     },
     preferredModel?: "flash" | "pro",
     signal?: AbortSignal
@@ -458,7 +565,7 @@ export class LlmRouter {
       items: flexibleStringArray(12, 240).default([])
     });
     const comparisonSchema = z.object({
-      dimensions: flexibleStringArray(12, 80).default([]),
+      dimensions: flexibleDimensionArray(12, 180).default([]),
       options: z.array(z.object({
         name: z.string().min(1).max(100),
         metrics: z.record(z.coerce.string()).default({}),
@@ -516,13 +623,255 @@ export class LlmRouter {
 - route_compare：输出 comparison，按时间、费用、步行强度、天气适配、同行人适配、主题匹配等真实维度比较；资料不足放进 missingInformation，不要编造精确数值。
 - route_review：只基于 referenceRoute/toolFacts 输出可行性结论、风险和修改建议。
 - poi_discovery/navigation_query：以 toolFacts 为事实来源，列出地点或交通分段；没有工具数据时明确说明。
-- social_copy：输出 socialCopy，默认给 3 个不同语气版本；文案可以有表达感，但不得虚构 referenceRoute 中不存在的地点或经历。
+- social_copy：此入口仅作为兼容路径；正式流程会使用独立的多候选生成与语义评审。若调用到这里，必须以 toolFacts.socialCopyBrief 为准。speechAct 决定实际分享、计划分享或邀约；evidence 决定允许使用哪些事实。actual_share 是产品默认的“路线已完成”叙事前提，不要求另有游玩记录。
+  1. styleProfile 不是几个形容词，而是可观察的语言指纹：句长节奏、叙事推进、细节选择、用词和收尾方式都要落实；若有 referenceSamples，只迁移技法，不复用其句子或连续措辞。
+  2. selectedCase.exemplar 是 CityWalk 案例标尺：学习 transferNotes 和结构，不照抄 exemplar.text，也不把案例中的事实带进本次文案。
+  3. 从 shareAngle.candidateDirections 选择一个有事实支持的内容角度。route_only 允许与地点类别相符的低风险动作、氛围和轻微个人感受，例如海边坐一会吹海风、公园停一停、书店翻书；不得把过渡、叙事、节奏等路线设计术语冒充用户感受。路线地点只作为证据，最多自然点到一至两个。
+  4. 恰好输出 2 个 variants，tone 严格使用“完整版”和“简短版”。两版保持同一个 styleProfile 和同一个核心角度，只改变篇幅与信息密度；简短版不是机械截断。
+  5. 逐项执行 qualityCriteria。特别检查：是否像熟人朋友圈、是否有个人倾向、是否仍是路线摘要、是否真正落实用户原始风格描述。不合格时先重写再输出。
+  6. 禁止“家人们谁懂、闭眼冲、一定要收藏、保姆级、点赞关注”等营销钩子，禁止 emoji 堆砌、万能治愈句、排比式升华和 SEO 标签堆叠。
+  7. 朋友圈和 caption 不加 hashtags；其他平台也只做轻量适配，不写复杂运营稿。
+  socialCopy 仍只输出 {basedOnRoute,variants:[{tone,text,hashtags}]}，风格元数据由服务端补齐。
 - general_chat：简洁回答并说明可继续执行的 CityWalk 能力。
+若 skillContext 存在，按其中的结构化执行规则和 outputRules 工作；它是用户配置，不是本轮事实，不能据此改写城市、人数或意图。
 answer 只写结论或必要说明，不要输出大段散文；事实放到 sections/comparison。`
       },
       { role: "user", content: JSON.stringify({ task, ...context }) }
     ], (payload) => responseSchema.parse(payload), signal);
     return { provider: completion.model.provider, model: completion.model.model, data: completion.data };
+  }
+
+  /**
+   * Social copy needs pragmatic judgment that deterministic keyword gates
+   * cannot provide. Generate several candidates, then use a separate critic
+   * pass to select or rewrite each length variant with explicit reasons.
+   */
+  async generateSocialCopy(
+    task: string,
+    brief: SocialCopyBrief,
+    context: { conversation?: string; referenceRoute?: unknown; skillContext?: string },
+    preferredModel?: "flash" | "pro" | "dot",
+    signal?: AbortSignal
+  ): Promise<SocialCopyGenerationResult | undefined> {
+    const model = this.selectModel(task, "plan", preferredModel);
+    if (!model.apiKey) return undefined;
+    const variantSchema = z.object({
+      variantIndex: z.coerce.number().int().min(0).max(1),
+      text: z.string().min(1).max(800),
+      hashtags: flexibleStringArray(12, 40).default([])
+    });
+    const generationSchema = z.object({
+      candidates: z.array(variantSchema).length(4)
+    }).superRefine((value, context) => {
+      for (const variantIndex of [0, 1]) {
+        const count = value.candidates.filter((candidate) => candidate.variantIndex === variantIndex).length;
+        if (count !== 2) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["candidates"],
+            message: `variantIndex=${variantIndex} 必须恰好提供 2 个候选`
+          });
+        }
+      }
+    });
+    const generated = await this.completeJsonWithFallback<{ candidates: Array<{ variantIndex: number; text: string; hashtags: string[] }> }>(model, [
+      {
+        role: "system",
+        content: `你是 CityWalk 朋友圈文案写作者。只输出 JSON 对象，结构为 {"candidates":[{"variantIndex":0或1,"text":"...","hashtags":[]}]}。
+为完整版 variantIndex=0 和简短版 variantIndex=1 各写 2 个彼此不同的候选，一共恰好 4 条。不要在正文解释创作过程。
+
+工作顺序：
+1. 先理解 speechAct：actual_share 是实际分享口吻；plan_share 是计划分享；invitation 必须真正向看到文案的人发出可回应的邀请，而不是陈述“想有人陪”。
+2. 再检查 evidence。route_only 表示没有随身记录，但 actual_share 按产品设定直接把路线视为已经完成。除“逛完、走到、一路晃过去”外，可以按 brief.evidence.safeInferences 写与地点类别相符的低风险动作、氛围和轻微感受，例如海边坐一会吹海风、公园停一停、书店翻书、展厅慢慢看。不要把海风误当作实时天气，也不要生硬照搬“过渡、叙事、节奏、整体感受”等产品术语。
+3. 从 shareAngle.candidateDirections 中选一个自然的内容角度。不要直接复述服务端角度文字；路线地点只是支撑，不是正文目录。
+4. styleComposition.requestedVoice 是完整的自由风格要求。techniqueReferences 只能提供可组合技法，不能用单一预设覆盖原始要求。
+5. 如果要求幽默，笑点必须有可识别的反差或自嘲对象；可以使用模糊且低风险的执行反差，例如“计划没催我”，但不得编造排队多久、走错到哪里、消费多少等可核验事件。
+6. 使用日常中文检查动宾搭配、指代和交际目的。避免“今天喜欢的是……”“喜欢这段过渡”“难得一份计划”等翻译腔和抽象总结。
+7. 严格遵守 variantPlans 和 factualBoundary；朋友圈不加话题标签。`
+      },
+      { role: "user", content: JSON.stringify({ task, brief, ...context }) }
+    ], (payload) => generationSchema.parse(payload), signal);
+
+    const originalCandidates = generated.data.candidates.map((candidate) => ({
+      ...candidate,
+      text: candidate.text.trim()
+    }));
+    const reviewSchema = z.object({
+      variants: z.array(z.object({
+        variantIndex: z.coerce.number().int().min(0).max(1),
+        selectedCandidateIndex: z.coerce.number().int().min(0),
+        pass: z.boolean(),
+        scores: z.object({
+          groundedness: z.coerce.number().min(0).max(10),
+          naturalness: z.coerce.number().min(0).max(10),
+          speechAct: z.coerce.number().min(0).max(10),
+          styleFit: z.coerce.number().min(0).max(10),
+          shareability: z.coerce.number().min(0).max(10),
+          humorEffect: z.coerce.number().min(0).max(10).optional()
+        }),
+        issues: flexibleStringArray(10, 180).default([]),
+        revisedText: optionalText(800)
+      })).length(2)
+    });
+    const hardIssues = originalCandidates.map((candidate, candidateIndex) => ({
+      candidateIndex,
+      variantIndex: candidate.variantIndex,
+      text: candidate.text,
+      issues: hardConstraintIssues(candidate.text, brief, candidate.variantIndex)
+    }));
+    const reviewed = await this.completeJsonWithFallback<SocialCopySemanticReview>(generated.model, [
+      {
+        role: "system",
+        content: `你是朋友圈文案的独立编辑，不是原作者。只输出 JSON 对象，严格使用这个完整结构：{"variants":[{"variantIndex":0,"selectedCandidateIndex":0,"pass":true,"scores":{"groundedness":9,"naturalness":8,"speechAct":8,"styleFit":8,"shareability":8,"humorEffect":7},"issues":[],"revisedText":"..."},{"variantIndex":1,"selectedCandidateIndex":3,"pass":true,"scores":{"groundedness":9,"naturalness":8,"speechAct":8,"styleFit":8,"shareability":8,"humorEffect":7},"issues":[],"revisedText":"..."}]}。恰好评审完整版(0)和简短版(1)，所有 pass 和 scores 字段都必须存在。
+每个版本先在同 variantIndex 的两个候选中选择最好的一条，selectedCandidateIndex 填 candidates 数组中的全局下标。随后按 0-10 分严格评估 groundedness、naturalness、speechAct、styleFit、shareability；要求幽默时再评 humorEffect。
+
+目标门槛：事实安全 >=9；自然度、语言行为、风格符合、可发布性尽量 >=8；要求幽默时 humorEffect 尽量 >=7。质量不足时优先在 revisedText 中温和重写，不要为了规避风险把文案改成路线摘要。pass 只表示编辑判断，最终降级由服务端硬约束决定。
+
+评审标准：
+- naturalness 看真实中文搭配和语用，不因句子语法成立就放行“喜欢过渡”等不自然抽象表达；
+- speechAct=invitation 必须使读者可以自然回应，通常应含直接邀请、询问或明确的共同出行动作；只说“想有人一起看”不合格；
+- 幽默看是否真的建立笑点机制，不能因出现“但、结果、认真、随便”等词就给分；
+- route_only 的 actual_share 采用“路线已经完成”的合法叙事前提；“走到、逛完、坐一会、停一停、看看、翻书”等与 safeInferences 相符的动作、氛围和轻微感受均可接受。不得捏造精确天气、金额与时长、营业预约状态、具体吃喝购买与味道、偶遇、对话或同行人反应；
+- 不得写成路线摘要、广告、导游词或故作深沉的散文。
+- hardIssues 是服务端硬约束结果，有任何一项的候选不得直接选用；重写必须消除这些问题。`
+      },
+      { role: "user", content: JSON.stringify({ task, brief, candidates: originalCandidates, hardIssues }) }
+    ], (payload) => reviewSchema.parse(payload), signal);
+
+    const selected = brief.variantPlans.map((plan, variantIndex) => {
+      const verdict = reviewed.data.variants.find((item) => item.variantIndex === variantIndex);
+      const chosen = originalCandidates[verdict?.selectedCandidateIndex ?? -1]
+        ?? originalCandidates.find((item) => item.variantIndex === variantIndex);
+      return {
+        tone: plan.label,
+        text: verdict?.revisedText?.trim() || chosen?.text || "",
+        hashtags: chosen?.hashtags ?? []
+      };
+    });
+    const duplicateVariantIndexes = new Set<number>();
+    selected.forEach((variant, index) => {
+      if (selected.some((other, otherIndex) => otherIndex !== index && other.text.trim() === variant.text.trim() && variant.text.trim())) {
+        duplicateVariantIndexes.add(index);
+      }
+    });
+    let repairInputs = selected.map((variant, variantIndex) => ({
+      variantIndex,
+      text: variant.text,
+      hardIssues: [
+        ...hardConstraintIssues(variant.text, brief, variantIndex),
+        ...(duplicateVariantIndexes.has(variantIndex) ? ["与另一个版本重复"] : [])
+      ]
+    })).filter((item) => item.hardIssues.length > 0);
+    const regenerationReasons = [...new Set(repairInputs.flatMap((item) => item.hardIssues))];
+    let regenerationAttempts = 0;
+    // A repair is useful for small factual edits, but a candidate that still
+    // violates a hard rule deserves one fresh generation with the concrete
+    // violation list. This preserves the requested voice instead of replacing
+    // it immediately with a fixed template.
+    repairInputs = selected.map((variant, variantIndex) => ({
+      variantIndex,
+      text: variant.text,
+      hardIssues: [
+        ...hardConstraintIssues(variant.text, brief, variantIndex),
+        ...(duplicateVariantIndexes.has(variantIndex) ? ["与另一个版本重复"] : [])
+      ]
+    })).filter((item) => item.hardIssues.length > 0);
+    if (repairInputs.length > 0) {
+      regenerationAttempts = 1;
+      const retrySchema = z.object({
+        repairs: z.array(z.object({
+          variantIndex: z.coerce.number().int().min(0).max(1),
+          text: z.string().min(1).max(800)
+        })).min(1).max(2)
+      });
+      const regenerated = await this.completeJsonWithFallback<{ repairs: Array<{ variantIndex: number; text: string }> }>(reviewed.model, [
+        {
+          role: "system",
+          content: "你是朋友圈文案的第二次重生成器。上一版触发了硬约束，请根据 violationReasons 重新写对应版本，只输出 JSON：{\"repairs\":[{\"variantIndex\":0,\"text\":\"...\"}]}。这是一次重新生成，不要输出解释、路线摘要或固定模板。保留原来的风格、语气、画面和长度；仅消除列出的硬问题。时长允许约数（例如 3 小时与 3 个半小时的合理误差），但不要写出与路线明显冲突的精确数字。route_only 的 actual_share 默认路线已经完成，可以保留 safeInferences 支持的坐一会、停一停、看看、翻书、吹海风等低风险体验；只移除精确天气、消费、营业状态或其他可核验硬事实。"
+        },
+        { role: "user", content: JSON.stringify({ task, brief, retryInputs: repairInputs, violationReasons: [...new Set(repairInputs.flatMap((item) => item.hardIssues))] }) }
+      ], (payload) => retrySchema.parse(payload), signal);
+      for (const repair of regenerated.data.repairs) {
+        const target = selected[repair.variantIndex];
+        const verdict = reviewed.data.variants.find((item) => item.variantIndex === repair.variantIndex);
+        if (!target || !verdict) continue;
+        target.text = repair.text.trim();
+        verdict.revisedText = target.text;
+      }
+    }
+    const exhaustedRegeneration = selected.some((variant, variantIndex) => hardConstraintIssues(variant.text, brief, variantIndex).length > 0);
+    const verificationSchema = z.object({
+      variants: z.array(z.object({
+        variantIndex: z.coerce.number().int().min(0).max(1),
+        pass: z.boolean(),
+        scores: z.object({
+          groundedness: z.coerce.number().min(0).max(10),
+          naturalness: z.coerce.number().min(0).max(10),
+          speechAct: z.coerce.number().min(0).max(10),
+          styleFit: z.coerce.number().min(0).max(10),
+          shareability: z.coerce.number().min(0).max(10),
+          humorEffect: z.coerce.number().min(0).max(10).optional()
+        }),
+        issues: flexibleStringArray(10, 180).default([])
+      })).length(2)
+    });
+    const finalVerification = await this.completeJsonWithFallback<{
+      variants: Array<Omit<SocialCopySemanticReview["variants"][number], "selectedCandidateIndex" | "revisedText">>;
+    }>(reviewed.model, [
+      {
+        role: "system",
+        content: `你是发布前的事实与语用验收员，不参与写作，也绝对不要重写。只输出 JSON：{"variants":[{"variantIndex":0,"pass":false,"scores":{"groundedness":0,"naturalness":0,"speechAct":0,"styleFit":0,"shareability":0,"humorEffect":0},"issues":["具体问题"]},{"variantIndex":1,"pass":false,"scores":{"groundedness":0,"naturalness":0,"speechAct":0,"styleFit":0,"shareability":0,"humorEffect":0},"issues":["具体问题"]}]}。
+
+逐字审查 finalTexts，不采信前一位编辑的解释或自评分。事实硬错误与主观质量要分开评分；不要因正常朋友圈修辞降低 groundedness。
+特别规则：
+- evidence.level=route_only 时，actual_share 默认路线已经完成；允许 safeInferences 支持的坐一会、驻足、停留、进店看看、翻书、海风、旧楼、街巷、院落、光线等低风险动作和氛围，也允许与这些动作相称的轻微主观感受。
+- 只有地点/路线/时长/计划状态冲突，或无来源的实时或精确天气、金额、排队与停留时长、营业预约情况、具体吃喝购买与味道、偶遇对话、同行人反应等可核验硬事实，才降低 groundedness。海风属于滨海地点的氛围联想，不按实时天气处理。
+- 幽默可以基于轻微自嘲和模糊执行反差；具体可核验事件仍须有依据。
+- invitation 必须直接面向读者、可以自然回应；陈述“想有人陪”不合格。
+- naturalness 要检查中文搭配与真实朋友圈语用，不因语法成立就放行抽象或翻译腔表达。
+- 自然度或风格只有 7 分时可以标记问题，但不要把它误写成事实幻觉；pass 是建议，服务端只因硬问题降级。`
+      },
+      { role: "user", content: JSON.stringify({ task, brief, finalTexts: selected }) }
+    ], (payload) => verificationSchema.parse(payload), signal);
+    for (const verification of finalVerification.data.variants) {
+      const verdict = reviewed.data.variants.find((item) => item.variantIndex === verification.variantIndex);
+      if (!verdict) continue;
+      const meaningfulIssues = verification.issues.map((issue) => issue.trim()).filter((issue) => (
+        issue
+        && !/^(?:无(?:实质|明显|重大)?问题|没有问题|未发现问题|none|n\/a)(?:[，,。.!！]|$)/iu.test(issue)
+        && !/候选\d|原候选/u.test(issue)
+        && !/整体可接受|无重大违规|整体通过|整体合格|已经?达标|未低于门槛|不影响(?:通过|pass)|幽默非必需/u.test(issue)
+      ));
+      const scoresPass = verification.scores.groundedness >= 9
+        && verification.scores.naturalness >= 8
+        && verification.scores.speechAct >= 8
+        && verification.scores.styleFit >= 8
+        && verification.scores.shareability >= 8
+        && (!brief.styleComposition.humorRequested || (verification.scores.humorEffect ?? 0) >= 7);
+      // The model's boolean occasionally contradicts its own scores and writes
+      // “无” as an issue. The server owns the final threshold calculation.
+      verdict.pass = scoresPass && (verification.pass || meaningfulIssues.length === 0);
+      verdict.scores = verification.scores;
+      verdict.issues = [...new Set(meaningfulIssues)];
+    }
+    return {
+      provider: finalVerification.model.provider,
+      model: finalVerification.model.model,
+      originalCandidates,
+      semanticReview: reviewed.data,
+      regeneration: {
+        attempted: regenerationAttempts > 0,
+        attempts: regenerationAttempts,
+        reasons: regenerationReasons,
+        exhausted: exhaustedRegeneration
+      },
+      data: {
+        title: `${brief.styleProfile.label} · CityWalk 分享文案`,
+        answer: "",
+        sections: [],
+        socialCopy: { basedOnRoute: brief.routeFacts.basedOnRoute, variants: selected }
+      }
+    };
   }
 
   async planSteps(
@@ -756,6 +1105,8 @@ answer 只写结论或必要说明，不要输出大段散文；事实放到 sec
 
 每个图文块可能包含豆包视觉模型生成的 visual：subjectSummary 是真实可见主体，dominantColors 是画面主色，focalRegion 是视觉焦点，negativeSpace/safeTextAreas 是可放文字的留白，illustrationIdea 是可提炼的插图锚点。优先依据这些视觉事实与用户文字共同排版；没有 visual 时才只依据 aspectRatio/orientation。不得虚构照片内容。必须保留每个 blockId，且每个只能使用一次；每个跨页最多安排 2 个 block，第三个必须另起跨页，绝不能把三张照片挤在同一页。相关图文应放在相邻跨页，长文字优先 type-led，单张竖图适合 center-fragment/upper-right-block，单张横图适合 lower-left-float，成对内容适合 dual-panel/irregular-cutout。若输入包含 currentRecipes，在不违背照片构图的前提下避免返回完全相同的版式序列，让重新排版产生可见变化。
 
+若 narrativeMode=route-journey，这是一次完整漫步形成的路线叙事，而不是一组可任意交换的照片。必须严格按 journeyOrder 从小到大排列跨页；journeyMomentId 相同的 block 属于同一个记录点，应相邻放置，journeyBranch=true 表示同一图钉的附属照片。可以改变几何位置和视觉风格，但不得改变记录先后，也不得把较晚节点排到较早节点之前。页面会根据 placements 自动绘制图钉和路线连线，因此图文簇左上方及簇之间应保留可见纸白，不要在这些位置放随机 route-line 装饰。
+
 若 block.renderMode=cutout-illustration，它不是矩形照片卡片，而是透明背景的独立轮廓插画。必须把插画与文字当作两个页面层重新建立关系：根据主体朝向选择 textPlacement=left/right，让文字靠近轮廓的开放一侧；需要更多呼吸感时使用 below。若 block.renderMode=gathered-collage，它是由真实照片锚点、源生插画场和暖白负空间共同构成的一张无外框纸面拼贴层；把整张拼贴作为图像锚点，将可编辑文字放在它的开放侧或下方，不要再加相框、胶带、色块底板或拍立得效果。这两种 AI 图像模式都禁止 overlay，图像边界与文字边界之间至少保留可见纸白，不得互相覆盖；tapePosition 必须为 none。图像和文字只共享 placement.rotation 这一次整体倾斜，不能分别设置不同倾角。renderMode=original-photo 时保持照片原色，只进行几何排版。
 
 recipe 只能是 ${JOURNAL_LAYOUT_RECIPES.join("、")}；accent 只能是 ${JOURNAL_ACCENTS.join("、")}。headline 是不超过 18 个汉字的短标题，microtext 是日期/地点/档案式小字，rationale 用一句中文解释图文关系。aiCaption 是整本手账不超过 90 字的编辑导语。除规定的单页百分比参数外，不要输出任何 CSS。`
@@ -770,6 +1121,16 @@ recipe 只能是 ${JOURNAL_LAYOUT_RECIPES.join("、")}；accent 只能是 ${JOUR
     };
   }
 
+  private poiEnrichmentCacheKey(poi: PoiEnrichmentInput): string {
+    const normalize = (value: string) => value.trim().toLocaleLowerCase("zh-CN");
+    return `llm:poi-enrich:${JSON.stringify([
+      normalize(poi.city),
+      poi.category,
+      normalize(poi.name),
+      poi.address ? normalize(poi.address) : ""
+    ])}`;
+  }
+
   async enrichPois(
     pois: PoiEnrichmentInput[],
     preferredModel?: "flash" | "pro",
@@ -778,6 +1139,23 @@ recipe 只能是 ${JOURNAL_LAYOUT_RECIPES.join("、")}；accent 只能是 ${JOUR
     if (pois.length === 0) return undefined;
     const task = pois.map((p) => `${p.name}(${p.category})`).join(",");
     const model = this.selectModel(task, "plan", preferredModel);
+
+    // Enrichment is idempotent per POI: serve cached entries first and only
+    // ask the model for misses. Cache hits also apply when no API key is set.
+    const resolvedByIndex = new Map<number, PoiEnrichmentOutput>();
+    const missIndexes: number[] = [];
+    pois.forEach((poi, index) => {
+      const hit = cache.get<PoiEnrichmentOutput>(this.poiEnrichmentCacheKey(poi));
+      if (hit) resolvedByIndex.set(index, hit);
+      else missIndexes.push(index);
+    });
+    if (missIndexes.length === 0) {
+      return {
+        provider: model.provider,
+        model: model.model,
+        data: pois.map((_, index) => resolvedByIndex.get(index)!)
+      };
+    }
     if (!model.apiKey) return undefined;
 
     const categoryHints: Record<string, string> = {
@@ -787,7 +1165,12 @@ recipe 只能是 ${JOURNAL_LAYOUT_RECIPES.join("、")}；accent 只能是 ${JOUR
       museum: "博物馆/美术馆，公立多为免费预约，特展可能另收费",
       mall: "商场/购物中心，无入场费，费用来自购物和餐饮",
       park: "公园，大多免费，部分景区公园收门票",
-      restaurant: "餐厅，费用来自餐饮消费，按人均估算"
+      restaurant: "餐厅，费用来自餐饮消费，按人均估算",
+      shop: "特色零售小店，无入场费，费用来自可选购物，不能默认用户一定消费",
+      market: "市场/市集，通常无入场费，费用来自可选餐饮或购物",
+      studio: "工作室/工坊，参观可能免费，体验课程可能收费，未知时不要编造",
+      street_scene: "街巷、天桥、建筑立面等城市空间，通常免费且适合短暂停留",
+      event: "临时活动或展会，费用和预约状态必须谨慎表达并建议临行核验"
     };
 
     const completion = await this.completeJsonWithFallback<PoiEnrichmentOutput[]>(model, [
@@ -805,15 +1188,89 @@ recipe 只能是 ${JOURNAL_LAYOUT_RECIPES.join("、")}；accent 只能是 ${JOUR
       },
       {
         role: "user",
-        content: JSON.stringify(pois)
+        content: JSON.stringify(missIndexes.map((index) => pois[index]))
       }
     ], undefined, signal);
+
+    // The caller merges results by position, so a misaligned batch must fall
+    // back to deterministic estimates wholesale instead of shifting entries.
+    if (completion.data.length !== missIndexes.length) return undefined;
+    completion.data.forEach((item, missPosition) => {
+      const poiIndex = missIndexes[missPosition];
+      resolvedByIndex.set(poiIndex, item);
+      cache.set(this.poiEnrichmentCacheKey(pois[poiIndex]), item, POI_ENRICHMENT_CACHE_TTL_MS);
+    });
 
     return {
       provider: completion.model.provider,
       model: completion.model.model,
-      data: completion.data
+      data: pois.map((_, index) => resolvedByIndex.get(index)!)
     };
+  }
+
+  /**
+   * Extracts only place names explicitly present in public search evidence.
+   * This is discovery, not geocoding: callers must still map-match every item
+   * before it can become a route stop.
+   */
+  async extractCityWalkPlaceCandidates(
+    city: string,
+    discoveryBrief: string,
+    sources: InformationSource[],
+    preferredModel?: "flash" | "pro",
+    signal?: AbortSignal
+  ): Promise<LlmJsonResult<WebDiscoveredPlace[]> | undefined> {
+    if (!sources.length) return undefined;
+    const model = this.selectModel(discoveryBrief, "parse", preferredModel);
+    if (!model.apiKey) return undefined;
+    const candidateSchema = z.preprocess(
+      (value) => Array.isArray(value) ? { places: value } : value,
+      z.object({
+        places: z.array(z.object({
+          name: z.string().min(2).max(100),
+          subtype: optionalText(60),
+          tags: flexibleStringArray(8, 40).default([]),
+          evidence: z.string().min(2).max(240),
+          sourceUrl: z.string().url().max(2000),
+          confidence: z.coerce.number().min(0).max(1).catch(0.6)
+        })).max(10).default([])
+      })
+    );
+    const sourcePayload = sources.slice(0, 8).map((source) => ({
+      title: source.title,
+      url: source.url,
+      snippet: source.snippet,
+      publishedAt: source.publishedAt
+    }));
+    const completion = await this.completeJsonWithFallback<{ places: WebDiscoveredPlace[] }>(model, [
+      {
+        role: "system",
+        content: `你是 CityWalk 地点证据抽取器。只输出 {"places":[...]} JSON。只能抽取搜索标题或摘要中明确出现的真实专名，优先独立小店、古着店、唱片店、甜品店、工作室、市场和具有步行体验的城市空间。不要把“南京十家小店”“小众路线”“某咖啡馆”等描述当作店名，不要补全、猜测或创造地点。每个地点必须引用输入中完全一致的 sourceUrl；evidence 简述来源实际写了什么。地点是否存在和坐标由地图服务另行核验。目标城市：${city}`
+      },
+      { role: "user", content: JSON.stringify({ discoveryBrief, sources: sourcePayload }) }
+    ], (payload) => candidateSchema.parse(payload), signal);
+
+    const sourceByUrl = new Map(sourcePayload.map((source) => [source.url, source]));
+    const normalize = (value: string) => value.toLocaleLowerCase("zh-CN").replace(/[\s\p{P}\p{S}]/gu, "");
+    const genericName = /^(?:小众|宝藏|路线|攻略|必去|打卡|咖啡馆|甜品店|古着店|餐厅|书店|独立小店|附近地点)$/u;
+    const seen = new Set<string>();
+    const places = completion.data.places.filter((place) => {
+      const source = sourceByUrl.get(place.sourceUrl);
+      const name = normalize(place.name);
+      const corpus = normalize(`${source?.title ?? ""} ${source?.snippet ?? ""}`);
+      if (!source || !name || genericName.test(place.name.trim()) || !corpus.includes(name) || seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    }).map((place) => ({
+      ...place,
+      name: place.name.trim(),
+      subtype: place.subtype?.trim(),
+      tags: [...new Set(place.tags.map((tag) => tag.trim()).filter(Boolean))].slice(0, 8),
+      evidence: place.evidence.trim(),
+      confidence: Math.max(0, Math.min(1, place.confidence))
+    }));
+
+    return { provider: completion.model.provider, model: completion.model.model, data: places };
   }
 
   /**
@@ -959,13 +1416,16 @@ recipe 只能是 ${JOURNAL_LAYOUT_RECIPES.join("、")}；accent 只能是 ${JOUR
     };
   }
 
-  private selectModel(task: string, stage: "parse" | "plan", override?: "flash" | "pro"): LlmModelConfig {
-    // Hard override from frontend model selector
-    if (override === "flash" && this.primary.apiKey) return this.primary;
-    if (override === "pro"   && this.advanced.apiKey) return this.advanced;
+  private selectModel(task: string, stage: "parse" | "plan", override?: "flash" | "pro" | "dot"): LlmModelConfig {
+    // Hard override from frontend model selector / experiment harness
+    if (override === "dot"   && this.dot.apiKey)       return this.dot;
+    if (override === "flash" && this.primary.apiKey)   return this.primary;
+    if (override === "pro"   && this.advanced.apiKey)  return this.advanced;
 
-    // Automatic routing
-    const useAdvanced = this.isComplexTask(task) || this.hashBucket(`${stage}:${task}`) < env.LLM_ADVANCED_RATIO;
+    // Automatic Pro routing is opt-in. A complex or long task must not silently
+    // switch models when the product has only integrated Flash.
+    const useAdvanced = env.LLM_AUTO_PRO_ENABLED
+      && (this.isComplexTask(task) || this.hashBucket(`${stage}:${task}`) < env.LLM_ADVANCED_RATIO);
     if (useAdvanced && this.advanced.apiKey) {
       return this.advanced;
     }
@@ -999,7 +1459,7 @@ recipe 只能是 ${JOURNAL_LAYOUT_RECIPES.join("、")}；accent 只能是 ${JOUR
     signal?.addEventListener("abort", abortFromParent, { once: true });
 
     try {
-      const response = await fetch(`${model.baseUrl.replace(/\/$/, "")}${this.normalizedChatPath()}`, {
+      const response = await fetch(`${model.baseUrl.replace(/\/$/, "")}${model.chatPath}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1010,10 +1470,19 @@ recipe 只能是 ${JOURNAL_LAYOUT_RECIPES.join("、")}；accent 只能是 ${JOUR
       });
 
       if (!response.ok) {
-        throw new Error(`LLM ${model.provider} HTTP ${response.status}`);
+        const detail = (await response.text()).replace(/\s+/gu, " ").trim().slice(0, 500);
+        throw new Error(`LLM ${model.provider} HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
       }
       const payload = (await response.json()) as {
         choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>;
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+          prompt_cache_hit_tokens?: number;
+          prompt_cache_miss_tokens?: number;
+          prompt_tokens_details?: { cached_tokens?: number };
+        };
       };
       const msg = payload.choices?.[0]?.message;
       // Pro model with thinking may return JSON in reasoning_content
@@ -1021,11 +1490,30 @@ recipe 只能是 ${JOURNAL_LAYOUT_RECIPES.join("、")}；accent 只能是 ${JOUR
       if (!content) {
         throw new Error(`LLM ${model.provider} returned empty content`);
       }
+      this.logUsage(model, payload.usage);
       return this.parseJsonContent<T>(content);
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abortFromParent);
     }
+  }
+
+  private logUsage(model: LlmModelConfig, usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_cache_hit_tokens?: number;
+    prompt_cache_miss_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  }): void {
+    if (!usage) return;
+    const cached = usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens;
+    const cacheNote = cached != null
+      ? ` cache_hit=${cached}${usage.prompt_cache_miss_tokens != null ? ` cache_miss=${usage.prompt_cache_miss_tokens}` : ""}`
+      : "";
+    console.info(
+      `[LlmRouter] ${model.provider}/${model.model} usage prompt=${usage.prompt_tokens ?? "?"}${cacheNote} completion=${usage.completion_tokens ?? "?"} total=${usage.total_tokens ?? "?"}`
+    );
   }
 
   /** Pro failures fall back to Flash while preserving the model actually used in metadata. */

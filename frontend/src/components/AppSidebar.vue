@@ -17,7 +17,7 @@ const journeyCount = computed(() => journal.entries.value.length)
 const navItems: Array<{ page: WorkspacePage; label: string; icon: string }> = [
   { page: 'chat', label: '漫游 Agent', icon: '✦' },
   { page: 'scrapbook', label: '手账书架', icon: '▤' },
-  { page: 'walk', label: '随身记录', icon: '⌁' },
+  { page: 'walk', label: '手机接力', icon: '⌁' },
   { page: 'profile', label: '旅行者档案', icon: '◌' },
 ]
 
@@ -27,9 +27,6 @@ function newWalk() {
 }
 
 function openPage(page: WorkspacePage) {
-  if (page === 'walk' && !journal.activeWalk.value && agent.result.value?.responseKind === 'route') {
-    journal.startWalk(agent.result.value)
-  }
   navigate(page)
 }
 

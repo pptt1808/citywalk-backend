@@ -46,6 +46,14 @@ function baseConstraints(): UserConstraints {
     accessibility: {},
     experience: { pace: "normal" },
     style: emptyStyleIntent(),
+    discoveryMode: "balanced",
+    discoveryPolicy: {
+      sourcePolicy: "web_when_relevant",
+      noveltyPreference: "neutral",
+      avoidOverexposed: false,
+      exposureScopes: [],
+      exposureStrength: "soft"
+    },
     constraintLedger: [],
     transportMode: "mixed"
   };

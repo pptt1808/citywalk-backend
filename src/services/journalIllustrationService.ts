@@ -4,7 +4,7 @@ import sharp from "sharp";
 import { env } from "../config/env";
 import { JournalIllustrationMode, JournalIllustrationRequest } from "../types/journal";
 import { journalAssetStore, JournalIllustrationAsset } from "./journalAssetStore";
-import { createFallbackJournalZineAnalysis, journalZineAnalysisService } from "./journalZineAnalysisService";
+import { createFallbackJournalZineAnalysis, detectSourceOrientation, journalZineAnalysisService } from "./journalZineAnalysisService";
 import { compileJournalZinePrompt, JOURNAL_ZINE_WORKFLOWS } from "./journalZinePromptCompiler";
 
 interface ArkImagePayload {
@@ -30,7 +30,7 @@ export interface JournalIllustrationResult {
   mode: JournalIllustrationMode;
   workflow: {
     skill: string;
-    version: "v1.3";
+    version: "v1.3" | "v0.1";
     visionUsed: boolean;
     visionModel?: string;
     summary: string;
@@ -287,6 +287,9 @@ export class JournalIllustrationService {
     if (!this.isConfigured()) throw new JournalIllustrationError("NOT_CONFIGURED", "尚未配置 Seedream 图片生成服务");
     const bytes = sourceBytes(input.sourceImage);
     const mode: JournalIllustrationMode = input.mode ?? "distilled-contour";
+    if (mode === "gathered-collage") {
+      throw new JournalIllustrationError("INVALID_SOURCE", "极简纸刊生成已停用，请使用场景蒸馏");
+    }
     const sourceHash = createHash("sha256").update(bytes).digest("hex");
     // Cache identity is based on source + user intent + workflow versions, not
     // on the vision model's prose. Repeating the same explicit generation must
@@ -294,13 +297,14 @@ export class JournalIllustrationService {
     const requestHash = createHash("sha256")
       .update(JSON.stringify({
         mode,
-        compiler: "journal-zine-runtime-v1.3.1",
+        compiler: "scene-distillation-zine-v1.3-runtime-4",
         context: {
           title: normalizeText(input.title, 160),
           text: normalizeText(input.text, 260),
           placeName: normalizeText(input.placeName, 120),
           city: normalizeText(input.city, 80),
-          styleDescription: normalizeText(input.styleDescription, 300)
+          styleDescription: normalizeText(input.styleDescription, 300),
+          stylePresetId: input.stylePresetId
         },
         visionModel: env.ARK_VISION_MODEL,
         imageModel: env.ARK_IMAGE_MODEL,
@@ -321,7 +325,7 @@ export class JournalIllustrationService {
           ...workflow,
           visionUsed,
           visionModel: visionUsed ? env.ARK_VISION_MODEL : undefined,
-          summary: mode === "gathered-collage" ? "已复用同一张照片的拾景拼贴结果" : "已复用同一张照片的轮廓蒸馏结果"
+          summary: "已复用同一张照片的场景蒸馏结果"
         }
       };
     }
@@ -344,7 +348,11 @@ export class JournalIllustrationService {
       } catch (error) {
         if (signal?.aborted) throw error;
         console.warn(`[JournalIllustration] zine visual analysis failed, continuing with safe card: ${error instanceof Error ? error.message : String(error)}`);
-        analysis = createFallbackJournalZineAnalysis(mode);
+        const metadata = await sharp(bytes).metadata();
+        analysis = createFallbackJournalZineAnalysis(
+          mode,
+          detectSourceOrientation(metadata.width, metadata.height, metadata.orientation)
+        );
       }
       const compiled = compileJournalZinePrompt(input, mode, analysis);
       const { prompt, styleDescription } = compiled;

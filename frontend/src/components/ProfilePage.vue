@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, ref } from 'vue'
 import { PhArrowRight, PhBooks, PhCompass, PhPath, PhPlus, PhSparkle } from '@phosphor-icons/vue'
-import { apiListFavoriteRoutes, apiListMemories, type FavoriteRoute, type MemoryItem, type PlanningResult } from '../api/agent'
+import { apiListFavoriteRoutes, apiListMemories, apiSendRouteToMobile, type FavoriteRoute, type MemoryItem, type PlanningResult } from '../api/agent'
 import type { useAuth } from '../composables/useAuth'
 import type { JournalController, ScrapbookEntry } from '../composables/useJournal'
 import type { SkillController, SkillDraft, UserSkill } from '../composables/useSkills'
+import type { AgentIntent } from '../api/agent'
 import type { NavigateWorkspace } from '../workspace'
 import { getMemoryUserId } from '../utils/identity'
 
@@ -18,7 +19,12 @@ const loading = ref(true)
 const skillEditorOpen = ref(false)
 const editingSkillId = ref<string | null>(null)
 const skillFormError = ref('')
-const skillDraft = ref<SkillDraft>({ name: '', description: '', instruction: '', enabled: true })
+const skillDraft = ref<SkillDraft>({ name: '', description: '', instruction: '', enabled: true, applicableIntents: [], activation: 'manual', priority: 'preference' })
+const intentOptions: Array<{ value: AgentIntent; label: string }> = [
+  { value: 'route_create', label: '路线制作' }, { value: 'route_modify', label: '路线修改' },
+  { value: 'poi_discovery', label: '地点发现' }, { value: 'route_review', label: '路线复盘' },
+  { value: 'social_copy', label: '分享文案' }, { value: 'info_query', label: '基础问答' }
+]
 
 const displayName = computed(() => auth.user.value?.username ?? 'Urban Explorer')
 const initials = computed(() => displayName.value.slice(0, 2).toUpperCase())
@@ -35,7 +41,7 @@ const enabledSkillCount = computed(() => skills.skills.value.filter(skill => ski
 
 function newSkill() {
   editingSkillId.value = null
-  skillDraft.value = { name: '', description: '', instruction: '', enabled: true }
+  skillDraft.value = { name: '', description: '', instruction: '', enabled: true, applicableIntents: [], activation: 'manual', priority: 'preference' }
   skillFormError.value = ''
   skillEditorOpen.value = true
 }
@@ -46,7 +52,7 @@ function editSkill(skill: UserSkill) {
     name: skill.name,
     description: skill.description,
     instruction: skill.instruction,
-    enabled: skill.enabled,
+    enabled: skill.enabled, applicableIntents: [...skill.applicableIntents], activation: skill.activation, priority: skill.priority,
   }
   skillFormError.value = ''
   skillEditorOpen.value = true
@@ -79,8 +85,8 @@ function deleteSkill(skill: UserSkill) {
   if (editingSkillId.value === skill.id) cancelSkillEdit()
 }
 
-function startWalk(route: PlanningResult) {
-  journal.startWalk(route)
+async function startWalk(route: PlanningResult) {
+  await apiSendRouteToMobile(route)
   navigate('walk')
 }
 
@@ -125,13 +131,13 @@ onMounted(loadProfile)
         <div><span class="heading-icon"><PhSparkle :size="27" weight="duotone" /></span><div><small>MY AGENT SKILLS</small><h3>Agent Skill 编辑</h3></div></div>
         <div class="skill-heading-actions"><span>{{ enabledSkillCount }} 项已启用</span><button class="primary-small" @click="newSkill"><PhPlus :size="16" weight="bold" /> 新建 Skill</button></div>
       </header>
-      <p class="skill-intro">这里的指令会在你从对话输入框选择 Skill 时随本轮需求一起交给 Agent。名字用于选择，执行指令决定它具体如何工作。</p>
+      <p class="skill-intro">这里的指令会在你从对话输入框选择 Skill 时随本轮需求一起交给 Agent。也可以开启自动推荐，让匹配当前意图的 Skill 自动生效；本轮明确要求始终拥有更高优先级。</p>
 
       <div class="skill-layout" :class="{ editing: skillEditorOpen }">
         <div class="skill-list">
           <article v-for="skill in skills.skills.value" :key="skill.id" class="skill-item" :class="{ disabled: !skill.enabled, selected: editingSkillId === skill.id }">
             <button class="skill-switch" role="switch" :aria-checked="skill.enabled" :aria-label="`${skill.enabled ? '停用' : '启用'} ${skill.name}`" @click="skills.toggleSkill(skill.id)"><i /></button>
-            <div class="skill-copy"><div><strong>{{ skill.name }}</strong><span>{{ skill.enabled ? '已启用' : '已停用' }}</span></div><p>{{ skill.description || '还没有填写简短说明。' }}</p><small>{{ skill.instruction }}</small></div>
+            <div class="skill-copy"><div><strong>{{ skill.name }}</strong><span>{{ skill.activation === 'recommended' ? '自动推荐' : skill.enabled ? '手动启用' : '已停用' }}</span></div><p>{{ skill.description || '还没有填写简短说明。' }}</p><small>{{ skill.instruction }}</small></div>
             <div class="skill-actions"><button @click="editSkill(skill)">编辑</button><button class="danger" @click="deleteSkill(skill)">删除</button></div>
           </article>
           <div v-if="!skills.skills.value.length" class="empty-skill"><strong>还没有自定义能力</strong><p>新建一个 Skill，把你经常提出的规划要求保存下来。</p><button @click="newSkill">创建第一个 Skill</button></div>
@@ -142,6 +148,9 @@ onMounted(loadProfile)
           <label><span>Skill 名称</span><input v-model="skillDraft.name" maxlength="24" placeholder="例如：雨天博物馆路线" /></label>
           <label><span>简短说明</span><input v-model="skillDraft.description" maxlength="80" placeholder="说明它适合什么场景" /></label>
           <label><span>执行指令</span><textarea v-model="skillDraft.instruction" rows="7" maxlength="800" placeholder="明确告诉 Agent 应关注什么、遵循哪些规则、最终输出什么。可以自由描述，不受枚举限制。" /></label>
+          <div class="editor-field"><span>适用意图（不选表示全部）</span><div class="intent-picker"><label v-for="item in intentOptions" :key="item.value"><input v-model="skillDraft.applicableIntents" type="checkbox" :value="item.value" /> {{ item.label }}</label></div></div>
+          <label><span>执行优先级</span><select v-model="skillDraft.priority"><option value="preference">偏好：与本轮要求冲突时让本轮优先</option><option value="requirement">要求：尽量满足，并在冲突时提示</option></select></label>
+          <label><span>启用方式</span><select v-model="skillDraft.activation"><option value="manual">手动：只在输入框选择时启用</option><option value="recommended">自动推荐：匹配适用意图时启用</option></select></label>
           <label class="editor-enabled"><button class="skill-switch" role="switch" :aria-checked="skillDraft.enabled" @click="skillDraft.enabled = !skillDraft.enabled"><i /></button><span>保存后立即启用</span></label>
           <p v-if="skillFormError" class="skill-form-error">{{ skillFormError }}</p>
           <footer><button class="cancel" @click="cancelSkillEdit">取消</button><button class="save" @click="saveSkill">保存 Skill</button></footer>
@@ -187,7 +196,7 @@ onMounted(loadProfile)
           <div class="route-line"><i v-for="stop in favorite.result.stops.slice(0, 6)" :key="stop.name" /><span /></div>
           <div class="saved-main"><small>{{ favorite.result.routeOverview?.city || '城市漫游' }}</small><h4>{{ favorite.result.title }}</h4><p>{{ favorite.result.stops.map(stop => stop.name).join(' → ') }}</p></div>
           <div class="route-meta"><span>{{ favorite.result.totalEstimatedMinutes }} 分钟</span><span>¥{{ favorite.result.totalEstimatedCost }}</span></div>
-          <div class="route-actions"><button class="go" @click="startWalk(favorite.result)">进入随身记录 <PhArrowRight :size="15" /></button></div>
+          <div class="route-actions"><button class="go" @click="startWalk(favorite.result)">发送到手机 <PhArrowRight :size="15" /></button></div>
         </article>
       </div>
       <div v-else-if="!loading" class="empty-route">还没有收藏路线。先去和 Agent 聊聊，把喜欢的路线收藏到这里。</div>
@@ -196,6 +205,8 @@ onMounted(loadProfile)
 </template>
 
 <style scoped>
+.intent-picker{display:flex;flex-wrap:wrap;gap:8px}.intent-picker label{display:flex;align-items:center;gap:4px;padding:5px 8px;border:1px solid var(--border-subtle);border-radius:999px;font-size:11px;font-weight:600}.intent-picker input{width:auto}.skill-editor select{width:100%;padding:10px 12px;border:1px solid rgba(138,114,102,.24);border-radius:9px;background:rgba(252,249,240,.72);color:var(--text-h);font-size:13px}
+.editor-field{display:grid;gap:6px;margin-top:13px}.editor-field>span{color:var(--text-h);font-size:11px;font-weight:800}
 .profile-page { flex: 1; min-height: 0; overflow-y: auto; padding: 42px clamp(24px, 5vw, 70px) 90px; }
 .profile-hero { display: grid; grid-template-columns: auto minmax(280px, 1fr) auto; align-items: center; gap: 28px; max-width: 1180px; margin: 0 auto 48px; }
 .avatar-wrap { width: 138px; height: 138px; border-radius: 50%; padding: 7px; background: #fff; border: 1px solid rgba(138,114,102,.25); box-shadow: 0 9px 24px rgba(86,67,56,.15); position: relative; transform: rotate(-2deg); }

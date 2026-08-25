@@ -1,0 +1,10 @@
+/.gradle/
+/.gradle-windows/
+/build/
+/local.properties
+/keystore.properties
+/keystore/
+/**/build/
+*.iml
+.idea/
+captures/

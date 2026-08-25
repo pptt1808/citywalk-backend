@@ -6,10 +6,11 @@ import { CAT_ICON, CAT_LABEL } from '../constants'
 const agent = inject<ReturnType<typeof useAgentPlan>>('agent')!
 
 const weatherRiskLabel = computed(() => {
-  const r = agent.result.value?.weatherRisk
+  const r = agent.result.value?.routeOverview?.weather.risk ?? agent.result.value?.weatherRisk
   if (r === 'low') return { text: '天气良好', icon: '🌤', cls: 'risk-low' }
   if (r === 'medium') return { text: '天气一般', icon: '⛅', cls: 'risk-mid' }
   if (r === 'high') return { text: '注意天气', icon: '🌧', cls: 'risk-high' }
+  if (r === 'unknown') return { text: '需补充出行时间', icon: '◷', cls: 'risk-mid' }
   return null
 })
 

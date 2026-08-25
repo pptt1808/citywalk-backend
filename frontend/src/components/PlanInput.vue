@@ -15,7 +15,7 @@ const templates = [
   { icon: '📍', label: '发现地点', text: '新街口附近有什么安静、有设计感的独立书店？' },
   { icon: '🏛', label: '查询信息', text: '南京博物院需要预约吗？有哪些参观注意事项？' },
   { icon: '⚖️', label: '比较路线', text: '比较我刚才提到的两条路线，重点看时间、花费和亲子友好程度' },
-  { icon: '✍️', label: '分享文案', text: '根据刚才的路线生成三条不同语气的朋友圈文案' },
+  { icon: '✍️', label: '分享文案', text: '根据刚才的路线写朋友圈文案，风格像发给朋友：松弛、具体，不强行升华' },
 ]
 
 const isRunning = computed(() => agent.isRunning.value)
